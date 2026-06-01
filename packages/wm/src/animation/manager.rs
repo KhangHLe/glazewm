@@ -1406,6 +1406,17 @@ impl AnimationManager {
     self.ensure_timer_running();
   }
 
+  /// Drops any in-flight iris overlay immediately, revealing the real windows
+  /// beneath.
+  ///
+  /// Called before snapshotting for a new switch so the snapshot captures the
+  /// real current workspace rather than the previous overlay mid-wipe — making
+  /// rapid switches play as clean successive wipes instead of nested ones.
+  #[cfg(target_os = "windows")]
+  pub fn clear_iris_switch(&mut self) {
+    self.iris_switch = None;
+  }
+
   /// Starts an open animation for a newly appearing window.
   ///
   /// The surrogate animates from a computed start state (determined by
