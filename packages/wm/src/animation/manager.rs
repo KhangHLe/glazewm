@@ -26,6 +26,19 @@ use std::{
 #[cfg(target_os = "windows")]
 const VSYNC_LEAD_FRACTION: f32 = 0.5;
 
+/// Pipeline latency estimate from vsync wake to DWM composition pickup.
+///
+/// The animation timer thread records the `Instant` at which
+/// `IDXGIOutput::WaitForVBlank` returns. By the time `update_internal` runs
+/// and calls `DwmUpdateThumbnailProperties`, roughly this many microseconds
+/// have elapsed (Tokio scheduling + compute). Using vsync_time +
+/// `VSYNC_PIPELINE_OFFSET_US` as "now" shifts the computed position forward
+/// to where it will be when DWM actually composites, eliminating the
+/// systematic one-pipeline-delay lag on high-Hz monitors. Used by the
+/// iris-wipe driver, which has no per-switch vblank period to lead by.
+#[cfg(target_os = "windows")]
+const VSYNC_PIPELINE_OFFSET_US: u64 = 1_500;
+
 /// Maximum residual slide distance, in pixels, at which a workspace-switch
 /// completes early.
 ///
@@ -49,7 +62,8 @@ use wm_common::{
 use wm_platform::{NativeWindow, OpacityValue, Rect};
 #[cfg(target_os = "windows")]
 use wm_platform::{
-  DxgiVsyncWaiter, NativeWindowWindowsExt, ResizeSession, WorkspaceSurrogate,
+  DxgiVsyncWaiter, NativeIrisOverlay, NativeWindowWindowsExt, ResizeSession,
+  WorkspaceSurrogate,
 };
 
 use crate::{
@@ -139,6 +153,30 @@ struct WorkspaceSwitchState {
   zoom_factor: f32,
 }
 
+/// State for an active iris-wipe workspace transition.
+///
+/// Unlike the per-window slide, the iris wipe uses a single frozen snapshot
+/// overlay: the incoming workspace is switched in normally (instantly)
+/// underneath, and a growing circular hole in the overlay reveals it. No
+/// per-window surrogates are involved.
+#[cfg(target_os = "windows")]
+struct IrisSwitchState {
+  /// Snapshot overlay shown on top of the (already switched) real windows.
+  overlay: NativeIrisOverlay,
+  /// Circle origin (screen pixels) from which the hole grows.
+  origin_x: i32,
+  origin_y: i32,
+  /// Radius (px) at which the hole fully covers the monitor.
+  max_radius: i32,
+  /// Time of the first rendered frame, lazily set on the first tick (mirrors
+  /// `WorkspaceSwitchState::start_time`).
+  start_time: Option<Instant>,
+  /// Total animation duration.
+  duration: Duration,
+  /// Easing applied to raw elapsed-time progress.
+  easing: EasingFunction,
+}
+
 /// Result of [`AnimationManager::start_animation_if_needed`], describing
 /// what the caller should do with the real app window's position this frame.
 pub enum AnimationPositionResult {
@@ -219,6 +257,9 @@ pub struct AnimationManager {
   /// sent after the fade finishes without borrowing the window container.
   #[cfg(target_os = "windows")]
   pending_close_windows: HashMap<Uuid, isize>,
+  /// Active iris-wipe workspace transition, or `None` when idle.
+  #[cfg(target_os = "windows")]
+  iris_switch: Option<IrisSwitchState>,
 }
 
 impl Drop for AnimationManager {
@@ -265,6 +306,8 @@ impl AnimationManager {
       pending_ws_cleanup: None,
       #[cfg(target_os = "windows")]
       pending_close_windows: HashMap::new(),
+      #[cfg(target_os = "windows")]
+      iris_switch: None,
     }
   }
 
@@ -340,6 +383,10 @@ impl AnimationManager {
     if self.workspace_switch.is_some() {
       return true;
     }
+    #[cfg(target_os = "windows")]
+    if self.iris_switch.is_some() {
+      return true;
+    }
     false
   }
 
@@ -366,6 +413,9 @@ impl AnimationManager {
     // On WM shutdown close-animation windows are left open — only clear
     // the tracking state without sending WM_CLOSE.
     self.pending_close_windows.clear();
+    // Drop the iris overlay (if any); the real windows are already at their
+    // final positions, so tearing it down simply reveals them.
+    self.iris_switch = None;
     sessions
   }
 
@@ -755,7 +805,11 @@ impl AnimationManager {
               WorkspaceSwitchDirection::Horizontal => ws.slide_distance_h,
               WorkspaceSwitchDirection::Vertical => ws.slide_distance_v,
             },
-            WorkspaceSwitchStyle::Fade | WorkspaceSwitchStyle::Zoom => 0,
+            // Iris never runs through the per-window slide path (it is driven
+            // separately via `iris_switch`), but the match must stay exhaustive.
+            WorkspaceSwitchStyle::Fade
+            | WorkspaceSwitchStyle::Zoom
+            | WorkspaceSwitchStyle::Iris => 0,
           };
           if slide_px > 0 {
             #[allow(clippy::cast_precision_loss)]
@@ -841,6 +895,10 @@ impl AnimationManager {
               WorkspaceSwitchStyle::Zoom => {
                 s.update_zoom(eased_final, entry.is_incoming);
               }
+              // Iris is driven by a separate snapshot overlay (see
+              // `iris_switch`), never by per-window surrogates, so it never
+              // reaches this driver.
+              WorkspaceSwitchStyle::Iris => {}
             }
           }
         }
@@ -876,6 +934,46 @@ impl AnimationManager {
       // surrogates are done and incoming windows are about to be uncloaked,
       // it is safe to transfer OS focus.
       state.pending_sync.queue_focus_change();
+    }
+
+    // Drive the iris-wipe overlay. The incoming workspace was already switched
+    // in normally underneath the overlay; here a growing circular hole reveals
+    // it. Uses the same vsync-aligned predictive timestamp as the slide driver.
+    #[cfg(target_os = "windows")]
+    {
+      use crate::animation::engine::{animation_progress_at, apply_easing};
+
+      let iris_done =
+        if let Some(iris) = &mut state.animation_manager.iris_switch {
+          let start = *iris.start_time.get_or_insert_with(Instant::now);
+          let raw_progress = {
+            let now = state
+              .animation_manager
+              .animation_vsync_time
+              .lock()
+              .expect("animation mutex poisoned")
+              .map(|t| {
+                t + std::time::Duration::from_micros(VSYNC_PIPELINE_OFFSET_US)
+              })
+              .unwrap_or_else(Instant::now);
+            animation_progress_at(start, iris.duration, now)
+          };
+          let eased = apply_easing(raw_progress, &iris.easing);
+          // Grow the hole from 0 to `max_radius` (which reaches the farthest
+          // corner at `eased == 1.0`); the overlay is dropped on the same final
+          // frame, so the corners never linger.
+          let radius = (eased * iris.max_radius as f32).round() as i32;
+          iris.overlay.set_hole(iris.origin_x, iris.origin_y, radius);
+          raw_progress >= 1.0
+        } else {
+          false
+        };
+
+      if iris_done {
+        // Dropping the overlay destroys the snapshot window, revealing the
+        // fully switched incoming workspace beneath.
+        state.animation_manager.iris_switch = None;
+      }
     }
 
     if state.pending_sync.has_changes() {
@@ -1269,6 +1367,43 @@ impl AnimationManager {
     } else {
       tracing::warn!("Workspace-switch skipped: no windows to animate.");
     }
+  }
+
+  /// Starts an iris-wipe workspace transition driven by `overlay`.
+  ///
+  /// The overlay is a frozen snapshot of the outgoing workspace shown on top of
+  /// the (already switched) real windows. The hole grows from radius `0` to
+  /// `max_radius` — which fully covers the monitor — from `(origin_x, origin_y)`
+  /// over `duration_ms`, revealing the live incoming workspace beneath. Installs
+  /// the per-monitor vsync waiter so the wipe is frame-aligned, mirroring the
+  /// slide driver.
+  #[cfg(target_os = "windows")]
+  pub fn start_iris_switch(
+    &mut self,
+    overlay: NativeIrisOverlay,
+    origin_x: i32,
+    origin_y: i32,
+    max_radius: i32,
+    monitor_handle: isize,
+    duration_ms: u32,
+    easing: EasingFunction,
+  ) {
+    tracing::info!(
+      "Starting iris-wipe workspace switch: origin=({origin_x},{origin_y}), \
+       max_radius={max_radius}, duration_ms={duration_ms}."
+    );
+    *self.animation_timer_vsync.lock().expect("animation mutex poisoned") =
+      DxgiVsyncWaiter::for_monitor(monitor_handle);
+    self.iris_switch = Some(IrisSwitchState {
+      overlay,
+      origin_x,
+      origin_y,
+      max_radius: max_radius.max(1),
+      start_time: None,
+      duration: Duration::from_millis(u64::from(duration_ms)),
+      easing,
+    });
+    self.ensure_timer_running();
   }
 
   /// Starts an open animation for a newly appearing window.
