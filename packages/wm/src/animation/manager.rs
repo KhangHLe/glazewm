@@ -7,17 +7,38 @@ use std::{
   time::{Duration, Instant},
 };
 
-/// Pipeline latency estimate from vsync wake to DWM composition pickup.
+/// Fraction of the monitor's vblank period to lead the animation clock by.
 ///
-/// The animation timer thread records the `Instant` at which
-/// `IDXGIOutput::WaitForVBlank` returns. By the time `update_internal` runs
-/// and calls `DwmUpdateThumbnailProperties`, roughly this many microseconds
-/// have elapsed (Tokio scheduling + compute). Using vsync_time +
-/// `VSYNC_PIPELINE_OFFSET_US` as "now" shifts the computed position forward
-/// to where it will be when DWM actually composites, eliminating the
-/// systematic one-pipeline-delay lag on high-Hz monitors.
+/// After `IDXGIOutput::WaitForVBlank` returns, the surrogate update written
+/// this tick is not composited by DWM until the *next* vblank — up to one
+/// full frame period later. Advancing the animation clock by a fraction of
+/// that period makes the computed position align with where it will be when
+/// DWM actually presents it, rather than systematically lagging behind.
+///
+/// Expressed as a fraction of the per-monitor frame period (see
+/// [`WorkspaceSwitchState::vblank_period_us`]) rather than a fixed
+/// microsecond value, so the compensation scales correctly across monitors
+/// with different refresh rates (e.g. a 60 Hz + 175 Hz multi-monitor setup).
+/// `0.5` leads by half a frame: a balance between under-compensating (motion
+/// trails the cursor) and over-compensating (motion arrives early). Tune
+/// here if the slide feels laggy (increase toward `1.0`) or rushed (decrease
+/// toward `0.0`).
 #[cfg(target_os = "windows")]
-const VSYNC_PIPELINE_OFFSET_US: u64 = 1_500;
+const VSYNC_LEAD_FRACTION: f32 = 0.5;
+
+/// Maximum residual slide distance, in pixels, at which a workspace-switch
+/// completes early.
+///
+/// Decelerating easing curves spend a large fraction of their wall-clock
+/// duration covering the final sliver of distance, which looks "stuck" at
+/// the destination. Completing early avoids that crawl, but the surrogate is
+/// then snapped the remaining distance to its target in a single frame before
+/// the real windows uncloak. Gating that completion on a fixed *pixel*
+/// distance (rather than a fixed progress fraction) keeps the snap below one
+/// pixel regardless of slide distance or duration, so it is imperceptible —
+/// a fixed 1% fraction would snap ~34px across a 3440px monitor.
+#[cfg(target_os = "windows")]
+const WS_COMPLETE_THRESHOLD_PX: f32 = 1.5;
 
 use tokio::sync::mpsc;
 use uuid::Uuid;
@@ -90,6 +111,21 @@ struct WorkspaceSwitchState {
   ///
   /// Mirrors `slide_distance_h` on the y-axis.
   slide_distance_v: i32,
+  /// Refresh period of the animation monitor in microseconds (one vblank
+  /// interval).
+  ///
+  /// Captured from the per-monitor `DxgiVsyncWaiter` when the switch starts.
+  /// Used with [`VSYNC_LEAD_FRACTION`] to lead the animation clock by a
+  /// fraction of a frame so the computed position aligns with the next DWM
+  /// composition. Defaults to the 60 Hz period when vsync is unavailable.
+  vblank_period_us: u64,
+  /// Whether `start_time` has been re-anchored to a vsync timestamp.
+  ///
+  /// The clock is provisionally anchored on the wall-clock cold-start tick,
+  /// then re-anchored once to the first real vblank so all vsync-driven
+  /// frames share a single origin. Stays `false` (wall-clock only) if no
+  /// vblank signal ever arrives.
+  vsync_anchored: bool,
   /// Scale applied to the whole workspace during slide transitions.
   ///
   /// Derived from `WorkspaceSwitchAnimationConfig::zoom_factor`. `0.0` means
@@ -118,8 +154,20 @@ pub struct AnimationManager {
   animations: HashMap<Uuid, WindowAnimationState>,
   /// Sender for animation tick events.
   animation_tick_tx: mpsc::UnboundedSender<()>,
-  /// Whether the animation timer thread is currently running.
+  /// Whether the animation timer thread is currently ticking (vs. parked).
+  ///
+  /// Acts as the gate for the persistent timer thread: set `true` to start a
+  /// ticking phase, `false` to send it back to parking.
   animation_timer_running: Arc<AtomicBool>,
+  /// Handle to the persistent animation timer thread.
+  ///
+  /// Spawned lazily on the first animation and kept for the process lifetime,
+  /// parking between animations rather than being re-spawned each time. This
+  /// removes the per-animation cost of thread creation + priority/MMCSS setup
+  /// from the input-to-first-frame latency path.
+  timer_thread: Mutex<Option<std::thread::JoinHandle<()>>>,
+  /// Signals the persistent timer thread to exit. Set on drop.
+  timer_shutdown: Arc<AtomicBool>,
   /// DXGI vsync waiter for the animation monitor.
   ///
   /// When `Some`, the timer thread calls `WaitForVBlank` on this output
@@ -132,9 +180,9 @@ pub struct AnimationManager {
   ///
   /// Written by the timer thread immediately after vsync fires. Read by
   /// `update_internal` to compute animation progress at a predictive
-  /// timestamp (vsync time + [`VSYNC_PIPELINE_OFFSET_US`]) rather than
-  /// `Instant::now()`, compensating for the fixed pipeline delay between
-  /// vsync wake and DWM composition.
+  /// timestamp (vsync time + a fraction of the vblank period; see
+  /// [`VSYNC_LEAD_FRACTION`]) rather than `Instant::now()`, compensating for
+  /// the pipeline delay between vsync wake and DWM composition.
   #[cfg(target_os = "windows")]
   animation_vsync_time: Arc<Mutex<Option<Instant>>>,
   /// Active resize sessions keyed by window ID.
@@ -168,6 +216,25 @@ pub struct AnimationManager {
   pending_close_windows: HashMap<Uuid, isize>,
 }
 
+impl Drop for AnimationManager {
+  /// Signals the persistent timer thread to exit.
+  ///
+  /// Sets the shutdown flag, clears the ticking gate, and unparks the thread
+  /// so it observes the shutdown and returns. The handle is dropped without
+  /// joining so shutdown never blocks — a thread mid-`WaitForVBlank` on a
+  /// sleeping monitor could otherwise stall the join indefinitely. The thread
+  /// exits on its own and is reaped by the OS at process exit.
+  fn drop(&mut self) {
+    self.timer_shutdown.store(true, Ordering::Relaxed);
+    self.animation_timer_running.store(false, Ordering::Relaxed);
+    if let Some(handle) =
+      self.timer_thread.lock().expect("animation mutex poisoned").take()
+    {
+      handle.thread().unpark();
+    }
+  }
+}
+
 impl AnimationManager {
   /// Creates a new `AnimationManager`.
   pub fn new(animation_tick_tx: mpsc::UnboundedSender<()>) -> Self {
@@ -175,6 +242,8 @@ impl AnimationManager {
       animations: HashMap::new(),
       animation_tick_tx,
       animation_timer_running: Arc::new(AtomicBool::new(false)),
+      timer_thread: Mutex::new(None),
+      timer_shutdown: Arc::new(AtomicBool::new(false)),
       #[cfg(target_os = "windows")]
       animation_timer_vsync: Arc::new(Mutex::new(None)),
       #[cfg(target_os = "windows")]
@@ -295,58 +364,107 @@ impl AnimationManager {
     sessions
   }
 
-  /// Starts the animation timer if it is not already running.
+  /// Starts a ticking phase of the persistent animation timer thread.
   ///
-  /// The timer thread uses a two-tier vsync strategy on Windows:
+  /// The timer thread is spawned once (on the first animation) and parked
+  /// between animations rather than re-created each time, so the cost of
+  /// thread creation and priority/MMCSS setup never lands on the
+  /// input-to-first-frame latency path. This call wakes the parked thread (or
+  /// spawns it the first time) when there are active animations and the
+  /// thread is not already ticking.
+  ///
+  /// The thread uses a two-tier vsync strategy on Windows:
   ///
   /// 1. **`IDXGIOutput::WaitForVBlank`** — during workspace-switch, waits for
-  ///    the animation monitor's specific vblank signal. Per-monitor and reliable
-  ///    at any Hz. Wakes right after vsync, leaving a full frame period for
-  ///    surrogate updates before the next composition.
+  ///    the animation monitor's specific vblank signal. Per-monitor and
+  ///    reliable at any Hz. Wakes right after vsync, leaving a full frame
+  ///    period for surrogate updates before the next composition.
   /// 2. **`DwmFlush`** — baseline for window move/resize animations, aligning
   ///    to the primary monitor's composition cycle.
   ///
   /// On non-Windows, `DwmFlush` is a no-op so a fixed 60 fps sleep is used.
   pub fn ensure_timer_running(&self) {
-    if self.has_active_animations()
-      && !self.animation_timer_running.load(Ordering::Relaxed) {
+    if !self.has_active_animations() {
+      return;
+    }
 
-      self.animation_timer_running.store(true, Ordering::Relaxed);
-      let tx = self.animation_tick_tx.clone();
-      let timer_flag = self.animation_timer_running.clone();
-      #[cfg(target_os = "windows")]
-      let vsync_waiter = self.animation_timer_vsync.clone();
-      #[cfg(target_os = "windows")]
-      let vsync_time = self.animation_vsync_time.clone();
+    // Idempotent: if the thread is already ticking, there is nothing to do.
+    // The swap also claims the idle -> ticking transition so only one caller
+    // wakes the thread.
+    if self.animation_timer_running.swap(true, Ordering::Relaxed) {
+      return;
+    }
 
-      // Spawn a real OS thread (not a Tokio task) so blocking vsync waits
-      // do not stall the async runtime.
-      let timer_flag_err = timer_flag.clone();
-      std::thread::Builder::new()
-        .name("glazewm-anim-tick".into())
-        .spawn(move || {
-          // Elevate scheduling priority. MMCSS "DisplayPostProcessing" gives
-          // near-real-time guarantees beyond THREAD_PRIORITY_HIGHEST, matching
-          // the scheduling class used by DWM and video renderers. Falls back
-          // gracefully to THREAD_PRIORITY_HIGHEST if avrt.dll is unavailable.
-          wm_platform::set_thread_priority_highest();
-          #[cfg(target_os = "windows")]
-          let _mmcss = wm_platform::try_set_thread_mmcss();
+    let mut guard =
+      self.timer_thread.lock().expect("animation mutex poisoned");
+    match guard.as_ref() {
+      // Wake the parked thread to begin a new ticking phase.
+      Some(handle) => handle.thread().unpark(),
+      // First animation: spawn the persistent thread.
+      None => {
+        if let Some(handle) = self.spawn_timer_thread() {
+          *guard = Some(handle);
+        }
+      }
+    }
+  }
+
+  /// Spawns the persistent animation timer thread.
+  ///
+  /// Returns the join handle, or `None` if the OS thread could not be
+  /// created. On failure the ticking gate is reset so a later
+  /// [`ensure_timer_running`] call retries the spawn.
+  ///
+  /// [`ensure_timer_running`]: AnimationManager::ensure_timer_running
+  fn spawn_timer_thread(&self) -> Option<std::thread::JoinHandle<()>> {
+    let tx = self.animation_tick_tx.clone();
+    let running = self.animation_timer_running.clone();
+    let shutdown = self.timer_shutdown.clone();
+    #[cfg(target_os = "windows")]
+    let vsync_waiter = self.animation_timer_vsync.clone();
+    #[cfg(target_os = "windows")]
+    let vsync_time = self.animation_vsync_time.clone();
+
+    // Spawn a real OS thread (not a Tokio task) so blocking vsync waits do
+    // not stall the async runtime.
+    let result = std::thread::Builder::new()
+      .name("glazewm-anim-tick".into())
+      .spawn(move || {
+        // Elevate scheduling priority once for the thread's whole lifetime.
+        // MMCSS "DisplayPostProcessing" gives near-real-time guarantees beyond
+        // THREAD_PRIORITY_HIGHEST, matching the scheduling class used by DWM
+        // and video renderers. Falls back gracefully to
+        // THREAD_PRIORITY_HIGHEST if avrt.dll is unavailable. The persistent
+        // thread keeps the registration across animations rather than
+        // re-acquiring it per switch; while parked it consumes no CPU.
+        wm_platform::set_thread_priority_highest();
+        #[cfg(target_os = "windows")]
+        let _mmcss = wm_platform::try_set_thread_mmcss();
+
+        loop {
+          // Idle: park until a ticking phase begins (or shutdown). A `while`
+          // loop re-checks the gate to absorb spurious wake-ups and any
+          // buffered unpark token from a just-ended phase.
+          while !running.load(Ordering::Relaxed) {
+            if shutdown.load(Ordering::Relaxed) {
+              return;
+            }
+            std::thread::park();
+          }
+          if shutdown.load(Ordering::Relaxed) {
+            return;
+          }
 
           // Send an immediate tick so the first animation frame begins
           // without waiting for the next vblank. Without this the surrogate
           // is frozen at its start position for up to one full frame period
           // (~16 ms at 60 Hz, ~5.7 ms at 175 Hz) before any movement begins.
           if tx.send(()).is_err() {
-            timer_flag.store(false, Ordering::Relaxed);
             return;
           }
 
-          loop {
-            if !timer_flag.load(Ordering::Relaxed) {
-              break;
-            }
-
+          // Ticking phase: drive frames until the gate clears.
+          while running.load(Ordering::Relaxed) {
             // Per-monitor IDXGIOutput::WaitForVBlank during workspace-switch.
             // Clone under the lock so the wait runs without holding it —
             // cleanup can clear the Arc without blocking an in-progress wait.
@@ -354,10 +472,14 @@ impl AnimationManager {
             // `update_internal` can compute phase-accurate animation progress.
             #[cfg(target_os = "windows")]
             let dxgi_waited = {
-              let waiter = vsync_waiter.lock().expect("animation mutex poisoned").clone();
+              let waiter = vsync_waiter
+                .lock()
+                .expect("animation mutex poisoned")
+                .clone();
               let waited = waiter.map(|w| w.wait()).unwrap_or(false);
               if waited {
-                *vsync_time.lock().expect("animation mutex poisoned") = Some(Instant::now());
+                *vsync_time.lock().expect("animation mutex poisoned") =
+                  Some(Instant::now());
               }
               waited
             };
@@ -365,28 +487,31 @@ impl AnimationManager {
             let dxgi_waited = false;
 
             if !dxgi_waited {
-              // DwmFlush for window move/resize animations (no workspace-switch
-              // active). On non-Windows this is a no-op, so a fixed 60 fps
-              // sleep paces the loop.
+              // DwmFlush for window move/resize animations (no
+              // workspace-switch active). On non-Windows this is a no-op, so
+              // a fixed 60 fps sleep paces the loop.
               wm_platform::dwm_flush();
               #[cfg(not(target_os = "windows"))]
               std::thread::sleep(std::time::Duration::from_micros(16_667));
             }
 
             if tx.send(()).is_err() {
-              break;
+              return;
             }
           }
+          // Gate cleared: loop back to park until the next animation.
+        }
+        // `_mmcss` is dropped on return, reverting the MMCSS registration.
+      });
 
-          timer_flag.store(false, Ordering::Relaxed);
-          // `_mmcss` is dropped here, automatically reverting the MMCSS
-          // registration via `MmcssGuard::drop`.
-        })
-        .unwrap_or_else(|err| {
-          tracing::warn!("Failed to spawn animation tick thread: {err}.");
-          timer_flag_err.store(false, Ordering::Relaxed);
-          std::thread::spawn(|| {})
-        });
+    match result {
+      Ok(handle) => Some(handle),
+      Err(err) => {
+        tracing::warn!("Failed to spawn animation tick thread: {err}.");
+        // Reset the gate so a later call retries the spawn.
+        self.animation_timer_running.store(false, Ordering::Relaxed);
+        None
+      }
     }
   }
 
@@ -560,34 +685,88 @@ impl AnimationManager {
       };
 
       if let Some(ws) = &mut state.animation_manager.workspace_switch {
-        let start = *ws.start_time.get_or_insert_with(Instant::now);
+        // Lead the vsync clock by a fraction of the monitor's vblank period
+        // so the computed position aligns with the next DWM composition
+        // rather than the moment this code runs (see `VSYNC_LEAD_FRACTION`).
+        #[allow(
+          clippy::cast_precision_loss,
+          clippy::cast_possible_truncation,
+          clippy::cast_sign_loss
+        )]
+        let lead_us =
+          (ws.vblank_period_us as f32 * VSYNC_LEAD_FRACTION) as u64;
+        let vsync_now = state
+          .animation_manager
+          .animation_vsync_time
+          .lock()
+          .expect("animation mutex poisoned")
+          .map(|t| t + std::time::Duration::from_micros(lead_us));
 
-        // For workspace-switch, use the vsync wake-up time plus a pipeline
-        // offset as "now" so the computed position aligns with the DWM
-        // composition event rather than the moment this code runs.
-        let raw_progress = {
-          let now = state
-            .animation_manager
-            .animation_vsync_time
-            .lock()
-            .expect("animation mutex poisoned")
-            .map(|t| {
-              t + std::time::Duration::from_micros(VSYNC_PIPELINE_OFFSET_US)
-            })
-            .unwrap_or_else(Instant::now);
-          animation_progress_at(start, ws.duration, now)
+        // Anchor the animation clock to the first vsync-aligned tick so every
+        // inter-frame step is measured on the same clock. Anchoring to a
+        // non-vsync wall-clock instant would make the first inter-frame step
+        // irregular — a visible hitch at the start, worst on a mixed-refresh-
+        // rate setup where the pre-switch `DwmFlush` (primary monitor) and the
+        // per-monitor vblank are out of phase.
+        //
+        // When a vsync timestamp is available, re-anchor `start_time` to the
+        // first one so all vsync-driven frames share a single clock origin.
+        // The cold-start tick (and any tick where the DXGI waiter is missing
+        // or `WaitForVBlank` failed) has no vsync timestamp; fall back to the
+        // wall clock so progress always advances. Without this fallback the
+        // animation would stall at progress 0.0 forever if a vblank signal
+        // never arrives, leaving the real windows cloaked.
+        let now = match vsync_now {
+          Some(vsync) => {
+            if !ws.vsync_anchored {
+              ws.start_time = Some(vsync);
+              ws.vsync_anchored = true;
+            }
+            vsync
+          }
+          None => Instant::now(),
         };
+        let start = *ws.start_time.get_or_insert(now);
+        let raw_progress = animation_progress_at(start, ws.duration, now);
         let eased = apply_easing(raw_progress, &ws.easing);
 
-        // Complete early once eased progress reaches 99% for non-overshooting
-        // curves — decelerating easing spends the final ~22% of wall time
-        // covering the last 1% of distance, which looks "stuck" at the
-        // destination. Overshooting curves always run to full wall-clock
-        // duration to preserve their bounce.
+        // Complete early once the surrogate is within
+        // `WS_COMPLETE_THRESHOLD_PX` of its target for non-overshooting
+        // curves — decelerating easing spends a large fraction of wall time
+        // covering the final sliver of distance, which looks "stuck" at the
+        // destination. Gating on residual *pixels* rather than a fixed
+        // progress fraction keeps the completion-frame snap sub-pixel for any
+        // slide distance or duration. Slide styles use their axis travel
+        // distance; fade/zoom have no positional travel, so fall back to a
+        // 99% fraction (a 1% opacity/scale snap is invisible). Overshooting
+        // curves always run to full wall-clock duration to preserve bounce.
         let ws_done = if ws.easing.can_overshoot() {
           raw_progress >= 1.0
+        } else if raw_progress >= 1.0 {
+          true
         } else {
-          raw_progress >= 1.0 || eased >= 0.99
+          let slide_px = match ws.style {
+            WorkspaceSwitchStyle::SlideHorizontal
+            | WorkspaceSwitchStyle::SlideCrossfadeHorizontal
+            | WorkspaceSwitchStyle::SlideFadeOutHorizontal
+            | WorkspaceSwitchStyle::SlideFadeInHorizontal => {
+              ws.slide_distance_h
+            }
+            WorkspaceSwitchStyle::SlideVertical
+            | WorkspaceSwitchStyle::SlideCrossfadeVertical
+            | WorkspaceSwitchStyle::SlideFadeOutVertical
+            | WorkspaceSwitchStyle::SlideFadeInVertical => {
+              ws.slide_distance_v
+            }
+            WorkspaceSwitchStyle::Fade | WorkspaceSwitchStyle::Zoom => 0,
+          };
+          if slide_px > 0 {
+            #[allow(clippy::cast_precision_loss)]
+            let remaining_px = (1.0 - eased) * slide_px as f32;
+            remaining_px <= WS_COMPLETE_THRESHOLD_PX
+          } else {
+            eased >= 0.99
+          }
         };
 
         // When completing early (eased < 1.0), snap surrogates to 1.0 so
@@ -598,12 +777,10 @@ impl AnimationManager {
 
         for entry in ws.windows.values_mut() {
           if let Some(ref mut s) = entry.surrogate {
-            // At completion, hide outgoing surrogates immediately rather than
-            // advancing them to eased_final=1.0. With the seam-gap adjustment
-            // the outgoing slide distance is less than monitor_width, so at
-            // t=1.0 the trailing edge of the outgoing panel would sit
-            // `leading_gap` pixels inside the monitor boundary — leaving a
-            // thin sliver visible for the final composition frame.
+            // At completion, hide outgoing surrogates immediately. They have
+            // already slid fully off-screen, but hiding the thumbnail outright
+            // guarantees nothing lingers for the final composition frame
+            // before the real windows are uncloaked.
             if ws_done && !entry.is_incoming {
               s.hide_thumbnail();
               continue;
@@ -1040,108 +1217,13 @@ impl AnimationManager {
 
     let duration_ms = ws_config.duration_ms;
 
-    // Compute slide travel distances that eliminate the visible seam between
-    // outgoing and incoming workspaces. With a plain monitor_width/height
-    // offset, the two panels have a (trailing_gap + leading_gap) strip of raw
-    // desktop between them — equal to 2×outer_gap in a standard layout. By
-    // reducing the slide distance by that sum, the panels start adjacent and
-    // move as one seamless surface.
-    let h_monitor_right = monitor_x + monitor_width;
-    let v_monitor_bottom = monitor_y + monitor_height;
-
-    let slide_distance_h = {
-      let (trailing, leading) = if direction >= 0 {
-        // Outgoing moves left; trailing edge = right side of outgoing content.
-        // Incoming from right; leading edge = left side of incoming content.
-        let max_out_right = windows
-          .iter()
-          .filter(|(_, _, is_in)| !is_in)
-          .filter_map(|(_, s, _)| s.as_ref())
-          .map(|s| s.rect.right)
-          .max()
-          .unwrap_or(h_monitor_right);
-        let min_in_left = windows
-          .iter()
-          .filter(|(_, _, is_in)| *is_in)
-          .filter_map(|(_, s, _)| s.as_ref())
-          .map(|s| s.rect.left)
-          .min()
-          .unwrap_or(monitor_x);
-        (
-          (h_monitor_right - max_out_right).max(0),
-          (min_in_left - monitor_x).max(0),
-        )
-      } else {
-        // Outgoing moves right; trailing edge = left side of outgoing content.
-        // Incoming from left; leading edge = right side of incoming content.
-        let min_out_left = windows
-          .iter()
-          .filter(|(_, _, is_in)| !is_in)
-          .filter_map(|(_, s, _)| s.as_ref())
-          .map(|s| s.rect.left)
-          .min()
-          .unwrap_or(monitor_x);
-        let max_in_right = windows
-          .iter()
-          .filter(|(_, _, is_in)| *is_in)
-          .filter_map(|(_, s, _)| s.as_ref())
-          .map(|s| s.rect.right)
-          .max()
-          .unwrap_or(h_monitor_right);
-        (
-          (min_out_left - monitor_x).max(0),
-          (h_monitor_right - max_in_right).max(0),
-        )
-      };
-      (monitor_width - trailing - leading).max(1)
-    };
-
-    let slide_distance_v = {
-      let (trailing, leading) = if direction >= 0 {
-        // Outgoing moves up; trailing edge = bottom side of outgoing content.
-        // Incoming from below; leading edge = top side of incoming content.
-        let max_out_bottom = windows
-          .iter()
-          .filter(|(_, _, is_in)| !is_in)
-          .filter_map(|(_, s, _)| s.as_ref())
-          .map(|s| s.rect.bottom)
-          .max()
-          .unwrap_or(v_monitor_bottom);
-        let min_in_top = windows
-          .iter()
-          .filter(|(_, _, is_in)| *is_in)
-          .filter_map(|(_, s, _)| s.as_ref())
-          .map(|s| s.rect.top)
-          .min()
-          .unwrap_or(monitor_y);
-        (
-          (v_monitor_bottom - max_out_bottom).max(0),
-          (min_in_top - monitor_y).max(0),
-        )
-      } else {
-        // Outgoing moves down; trailing edge = top side of outgoing content.
-        // Incoming from above; leading edge = bottom side of incoming content.
-        let min_out_top = windows
-          .iter()
-          .filter(|(_, _, is_in)| !is_in)
-          .filter_map(|(_, s, _)| s.as_ref())
-          .map(|s| s.rect.top)
-          .min()
-          .unwrap_or(monitor_y);
-        let max_in_bottom = windows
-          .iter()
-          .filter(|(_, _, is_in)| *is_in)
-          .filter_map(|(_, s, _)| s.as_ref())
-          .map(|s| s.rect.bottom)
-          .max()
-          .unwrap_or(v_monitor_bottom);
-        (
-          (min_out_top - monitor_y).max(0),
-          (v_monitor_bottom - max_in_bottom).max(0),
-        )
-      };
-      (monitor_height - trailing - leading).max(1)
-    };
+    // Slide each workspace the full monitor dimension. The outgoing workspace
+    // exits the screen completely (no residual sliver at the trailing edge),
+    // and the incoming workspace starts one full monitor away. The two
+    // workspaces keep their normal outer-gap spacing during the slide rather
+    // than being pulled together by a seam-gap reduction.
+    let slide_distance_h = monitor_width.max(1);
+    let slide_distance_v = monitor_height.max(1);
 
     let ws_windows: HashMap<Uuid, WorkspaceSwitchEntry> = windows
       .into_iter()
@@ -1163,8 +1245,13 @@ impl AnimationManager {
       // Install the per-monitor DXGI vsync waiter so the timer thread wakes
       // up right after each vblank, giving a full frame period for surrogate
       // updates before the next DWM composition.
+      let waiter = DxgiVsyncWaiter::for_monitor(monitor_handle);
+      // Capture the monitor's vblank period for frame-relative clock leading;
+      // fall back to the 60 Hz period when vsync is unavailable.
+      let vblank_period_us =
+        waiter.as_ref().map_or(16_667, DxgiVsyncWaiter::frame_period_us);
       *self.animation_timer_vsync.lock().expect("animation mutex poisoned") =
-        DxgiVsyncWaiter::for_monitor(monitor_handle);
+        waiter;
       self.workspace_switch = Some(WorkspaceSwitchState {
         windows: ws_windows,
         start_time: None,
@@ -1179,6 +1266,8 @@ impl AnimationManager {
         slide_distance_h,
         slide_distance_v,
         zoom_factor: ws_config.zoom_factor.clamp(0.0, 1.0),
+        vblank_period_us,
+        vsync_anchored: false,
       });
     } else {
       tracing::warn!("Workspace-switch skipped: no windows to animate.");

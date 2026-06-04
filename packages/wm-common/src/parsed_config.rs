@@ -698,8 +698,8 @@ impl Default for WorkspaceSwitchAnimationConfig {
   fn default() -> Self {
     WorkspaceSwitchAnimationConfig {
       enabled: true,
-      duration_ms: 300,
-      easing: EasingFunction::CubicBezier(0.33, 1.0, 0.68, 1.0),
+      duration_ms: 250,
+      easing: EasingFunction::CubicBezier(0.16, 1.0, 0.3, 1.0),
       style: WorkspaceSwitchStyle::default(),
       zoom_factor: 0.1,
     }

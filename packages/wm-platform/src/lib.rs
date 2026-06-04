@@ -72,6 +72,13 @@ pub fn dwm_flush() {
 #[derive(Clone)]
 pub struct DxgiVsyncWaiter {
   output: windows::Win32::Graphics::Dxgi::IDXGIOutput,
+  /// Monitor refresh period in microseconds (one vblank interval).
+  ///
+  /// Captured once at construction from the output's current display mode.
+  /// Used by callers to lead the animation clock by a fraction of a frame so
+  /// the computed position aligns with the next DWM composition. Defaults to
+  /// the 60 Hz period (`16_667`) when the refresh rate cannot be queried.
+  frame_period_us: u64,
 }
 
 #[cfg(target_os = "windows")]
@@ -107,13 +114,59 @@ impl DxgiVsyncWaiter {
         if unsafe { output.GetDesc(&mut desc) }.is_ok()
           && desc.Monitor == HMONITOR(monitor_handle)
         {
-          return Some(Self { output });
+          let frame_period_us = Self::query_frame_period_us(&desc.DeviceName);
+          return Some(Self { output, frame_period_us });
         }
         oi += 1;
       }
       ai += 1;
     }
     None
+  }
+
+  /// Queries the current refresh period (microseconds per vblank) for the GDI
+  /// device named by `device_name`.
+  ///
+  /// Reads the active display mode via `EnumDisplaySettingsW`. Returns the
+  /// 60 Hz period (`16_667`) when the rate is unavailable or reported as the
+  /// hardware-default sentinel (`0` or `1`).
+  fn query_frame_period_us(device_name: &[u16; 32]) -> u64 {
+    use windows::{
+      core::PCWSTR,
+      Win32::Graphics::Gdi::{
+        EnumDisplaySettingsW, DEVMODEW, ENUM_CURRENT_SETTINGS,
+      },
+    };
+
+    const DEFAULT_60HZ_US: u64 = 16_667;
+
+    let mut devmode = DEVMODEW {
+      dmSize: std::mem::size_of::<DEVMODEW>() as u16,
+      ..Default::default()
+    };
+
+    // SAFETY: `device_name` is a null-terminated wide string from
+    // `DXGI_OUTPUT_DESC`; `devmode` is stack-allocated with `dmSize` set per
+    // the `EnumDisplaySettingsW` contract.
+    let ok = unsafe {
+      EnumDisplaySettingsW(
+        PCWSTR(device_name.as_ptr()),
+        ENUM_CURRENT_SETTINGS,
+        &mut devmode,
+      )
+    }
+    .as_bool();
+
+    if !ok || devmode.dmDisplayFrequency <= 1 {
+      return DEFAULT_60HZ_US;
+    }
+
+    1_000_000 / u64::from(devmode.dmDisplayFrequency)
+  }
+
+  /// Monitor refresh period in microseconds (one vblank interval).
+  pub fn frame_period_us(&self) -> u64 {
+    self.frame_period_us
   }
 
   /// Blocks until the next vertical-blank signal from this output.
