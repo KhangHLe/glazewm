@@ -125,7 +125,22 @@ impl WindowAnimationState {
   /// when both values are needed in the same frame — `eased_progress` (which
   /// runs a Newton-Raphson solve) is computed only once.
   pub fn current_state(&self) -> (Rect, Option<OpacityValue>) {
-    let progress = self.eased_progress();
+    self.current_state_at(Instant::now())
+  }
+
+  /// Gets the interpolated rect and opacity at an explicit `now` instant.
+  ///
+  /// Like [`current_state`], but evaluates progress at a caller-supplied
+  /// predictive timestamp (e.g. a vsync wake-up led forward by a fraction of
+  /// a frame) so the computed position aligns with the next DWM composition
+  /// rather than the moment this code runs.
+  ///
+  /// [`current_state`]: WindowAnimationState::current_state
+  pub fn current_state_at(
+    &self,
+    now: Instant,
+  ) -> (Rect, Option<OpacityValue>) {
+    let progress = self.eased_progress_at(now);
     let rect = self.start_rect.interpolate(&self.target_rect, progress);
     let opacity = match (&self.start_opacity, &self.target_opacity) {
       (Some(start), Some(end)) => Some(start.interpolate(end, progress)),

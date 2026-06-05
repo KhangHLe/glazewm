@@ -260,6 +260,19 @@ pub struct AnimationManager {
   /// Active iris-wipe workspace transition, or `None` when idle.
   #[cfg(target_os = "windows")]
   iris_switch: Option<IrisSwitchState>,
+  /// Vblank period (µs) of the monitor currently pacing move/resize surrogate
+  /// animations.
+  ///
+  /// Set when the per-monitor `DxgiVsyncWaiter` is installed for a move/resize
+  /// `ResizeSession` (see [`start_animation_if_needed`]). Used by
+  /// [`predictive_now`] to lead the animation clock by [`VSYNC_LEAD_FRACTION`]
+  /// of a frame so the computed surrogate position aligns with the next DWM
+  /// composition. `0` when no waiter is installed (DwmFlush fallback).
+  ///
+  /// [`start_animation_if_needed`]: AnimationManager::start_animation_if_needed
+  /// [`predictive_now`]: AnimationManager::predictive_now
+  #[cfg(target_os = "windows")]
+  resize_vblank_period_us: u64,
 }
 
 impl Drop for AnimationManager {
@@ -308,6 +321,8 @@ impl AnimationManager {
       pending_close_windows: HashMap::new(),
       #[cfg(target_os = "windows")]
       iris_switch: None,
+      #[cfg(target_os = "windows")]
+      resize_vblank_period_us: 0,
     }
   }
 
@@ -410,6 +425,7 @@ impl AnimationManager {
     self.pending_ws_cleanup = None;
     *self.animation_timer_vsync.lock().expect("animation mutex poisoned") = None;
     *self.animation_vsync_time.lock().expect("animation mutex poisoned") = None;
+    self.resize_vblank_period_us = 0;
     // On WM shutdown close-animation windows are left open — only clear
     // the tracking state without sending WM_CLOSE.
     self.pending_close_windows.clear();
@@ -1015,9 +1031,55 @@ impl AnimationManager {
         .animation_manager
         .animation_timer_running
         .store(false, Ordering::Relaxed);
+
+      // All animations are done: clear the move/resize DXGI vsync waiter so a
+      // later animation re-selects its own monitor and the timer reverts to
+      // DwmFlush when vsync is unavailable. Workspace-switch/iris clear their
+      // own waiter above; this also covers move/resize, which has no
+      // dedicated completion hook. Safe here because no animation is active.
+      #[cfg(target_os = "windows")]
+      {
+        *state
+          .animation_manager
+          .animation_timer_vsync
+          .lock()
+          .expect("animation mutex poisoned") = None;
+        *state
+          .animation_manager
+          .animation_vsync_time
+          .lock()
+          .expect("animation mutex poisoned") = None;
+        state.animation_manager.resize_vblank_period_us = 0;
+      }
     }
 
     Ok(())
+  }
+
+  /// Returns the predictive timestamp for driving move/resize surrogates.
+  ///
+  /// When a per-monitor `DxgiVsyncWaiter` is installed, returns the most
+  /// recent vsync wake-up time led forward by [`VSYNC_LEAD_FRACTION`] of the
+  /// monitor's vblank period, so the computed surrogate position aligns with
+  /// the next DWM composition rather than the moment this code runs (matching
+  /// the workspace-switch slide driver). Falls back to `Instant::now()` when
+  /// no vsync timestamp is available yet (the cold-start tick, or DwmFlush
+  /// pacing when no waiter is installed).
+  #[cfg(target_os = "windows")]
+  fn predictive_now(&self) -> Instant {
+    #[allow(
+      clippy::cast_precision_loss,
+      clippy::cast_possible_truncation,
+      clippy::cast_sign_loss
+    )]
+    let lead_us =
+      (self.resize_vblank_period_us as f32 * VSYNC_LEAD_FRACTION) as u64;
+    self
+      .animation_vsync_time
+      .lock()
+      .expect("animation mutex poisoned")
+      .map(|t| t + Duration::from_micros(lead_us))
+      .unwrap_or_else(Instant::now)
   }
 
   /// Determines whether a new animation should be started for a window.
@@ -1155,6 +1217,27 @@ impl AnimationManager {
           ) {
             Ok(session) => {
               self.resize_sessions.insert(window_id, session);
+
+              // Pace the surrogate by this window's monitor vblank via a
+              // per-monitor `DxgiVsyncWaiter` (reliable at any refresh rate)
+              // instead of `DwmFlush`, which is locked to the primary monitor
+              // and judders on secondary/high-Hz monitors. Only install when
+              // none is set: a workspace-switch waiter takes precedence, and
+              // concurrent move/resize sessions share the first window's
+              // monitor clock (the common case is single-monitor). Cleared
+              // once all animations finish (see `update_internal`).
+              let mut guard = self
+                .animation_timer_vsync
+                .lock()
+                .expect("animation mutex poisoned");
+              if guard.is_none() {
+                if let Some(waiter) =
+                  DxgiVsyncWaiter::for_window(native_window.hwnd())
+                {
+                  self.resize_vblank_period_us = waiter.frame_period_us();
+                  *guard = Some(waiter);
+                }
+              }
             }
             Err(err) => {
               tracing::warn!(
@@ -1167,9 +1250,18 @@ impl AnimationManager {
       }
     }
 
+    // Evaluate this frame's position at a predictive timestamp so the
+    // surrogate aligns with the next DWM composition rather than lagging by
+    // one pipeline delay. On non-Windows there is no vsync clock, so this is
+    // just `Instant::now()`.
+    #[cfg(target_os = "windows")]
+    let now = self.predictive_now();
+    #[cfg(not(target_os = "windows"))]
+    let now = Instant::now();
+
     // Re-fetch the animation after potentially starting a new one.
     if let Some(animation) = self.get_animation(&window_id) {
-      let (current_rect, opacity) = animation.current_state();
+      let (current_rect, opacity) = animation.current_state_at(now);
 
       // Drive the surrogate overlay when one is active. `has_surrogate()`
       // requires a valid DWM thumbnail — if thumbnail registration failed (e.g.

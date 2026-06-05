@@ -152,6 +152,25 @@ impl DxgiVsyncWaiter {
     None
   }
 
+  /// Locates the `IDXGIOutput` for the monitor that `hwnd` currently occupies.
+  ///
+  /// Resolves the window's nearest monitor via `MonitorFromWindow`, then
+  /// delegates to [`for_monitor`]. Returns `None` when DXGI is unavailable or
+  /// no output matches the window's monitor.
+  ///
+  /// [`for_monitor`]: DxgiVsyncWaiter::for_monitor
+  pub fn for_window(hwnd: windows::Win32::Foundation::HWND) -> Option<Self> {
+    use windows::Win32::Graphics::Gdi::{
+      MonitorFromWindow, MONITOR_DEFAULTTONEAREST,
+    };
+
+    // SAFETY: `MonitorFromWindow` accepts any `HWND`; an invalid handle yields
+    // a null `HMONITOR`, which `for_monitor` then fails to match (returning
+    // `None`).
+    let monitor = unsafe { MonitorFromWindow(hwnd, MONITOR_DEFAULTTONEAREST) };
+    Self::for_monitor(monitor.0)
+  }
+
   /// Queries the current refresh period (microseconds per vblank) for the GDI
   /// device named by `device_name`.
   ///
