@@ -8,6 +8,14 @@ use wm_platform::{OpacityValue, Rect};
 
 use crate::animation::engine::{animation_progress_at, apply_easing};
 
+/// Residual rect travel distance, in pixels, at which a non-overshooting
+/// animation completes early.
+///
+/// Kept below one pixel so the single-frame snap from the early-completion
+/// position to the exact target is imperceptible for any travel distance.
+/// Mirrors `WS_COMPLETE_THRESHOLD_PX` used by the workspace-switch driver.
+const COMPLETE_THRESHOLD_PX: f32 = 1.0;
+
 /// State of an individual window animation.
 #[derive(Clone, Debug)]
 pub struct WindowAnimationState {
@@ -98,8 +106,26 @@ impl WindowAnimationState {
     let eased = apply_easing(raw, &self.easing);
     let done = if self.easing.can_overshoot() {
       raw == 1.0
+    } else if raw == 1.0 {
+      true
     } else {
-      raw == 1.0 || eased >= 0.99
+      // Decelerating easing spends a large fraction of its wall-clock
+      // duration covering the final sliver of distance, which looks "stuck"
+      // at the destination — so complete early. Gating that completion on a
+      // fixed residual *pixel* distance (rather than a fixed eased fraction)
+      // keeps the completion-frame snap sub-pixel regardless of travel
+      // distance: a fixed `eased >= 0.99` would snap ~1% of the travel, which
+      // is imperceptible for a short move but a visible 10-20px jump at the
+      // end of an open/close slide spanning a whole window dimension. Mirrors
+      // `WS_COMPLETE_THRESHOLD_PX` in the workspace-switch driver.
+      let max_travel = self.max_travel_px();
+      if max_travel > 0.0 {
+        (1.0 - eased) * max_travel <= COMPLETE_THRESHOLD_PX
+      } else {
+        // No positional travel (e.g. an opacity-only fade): there is no
+        // pixel distance to gate on, so fall back to the eased fraction.
+        eased >= 0.99
+      }
     };
     if done { 1.0 } else { eased }
   }
@@ -107,6 +133,24 @@ impl WindowAnimationState {
   /// Gets the eased progress in [0.0, 1.0], snapping to 1.0 when complete.
   pub fn eased_progress(&self) -> f32 {
     self.eased_progress_at(Instant::now())
+  }
+
+  /// Largest per-axis rect travel distance, in pixels, between the start and
+  /// target rects.
+  ///
+  /// Returns the maximum of the absolute position and size deltas, giving an
+  /// upper bound on how far any edge of the window moves over the animation.
+  /// Returns `0` for opacity-only animations whose start and target rects are
+  /// identical.
+  fn max_travel_px(&self) -> f32 {
+    let dx = (self.target_rect.x() - self.start_rect.x()).abs();
+    let dy = (self.target_rect.y() - self.start_rect.y()).abs();
+    let dw = (self.target_rect.width() - self.start_rect.width()).abs();
+    let dh = (self.target_rect.height() - self.start_rect.height()).abs();
+    #[allow(clippy::cast_precision_loss)]
+    {
+      dx.max(dy).max(dw).max(dh) as f32
+    }
   }
 
   /// Whether the animation has completed.
@@ -147,5 +191,106 @@ impl WindowAnimationState {
       _ => None,
     };
     (rect, opacity)
+  }
+}
+
+#[cfg(test)]
+mod tests {
+  use super::*;
+  use wm_platform::Rect;
+
+  /// A cubic bezier with collinear, evenly-spaced control points is exactly
+  /// the identity curve, so `eased == raw`. Used to make completion behaviour
+  /// deterministic in tests.
+  fn linear() -> EasingFunction {
+    EasingFunction::CubicBezier(1.0 / 3.0, 1.0 / 3.0, 2.0 / 3.0, 2.0 / 3.0)
+  }
+
+  /// A long slide must not snap to the target while it is still many pixels
+  /// away: at 99% progress over a 10000px slide the residual is 100px, so the
+  /// animation reports the eased value rather than completing.
+  #[test]
+  fn long_slide_does_not_snap_at_ninety_nine_percent() {
+    let anim = WindowAnimationState::new_movement(
+      Rect::from_xy(0, 0, 100, 100),
+      Rect::from_xy(10_000, 0, 100, 100),
+      10_000,
+      linear(),
+    );
+
+    let t0 = Instant::now();
+    // First call anchors `start_time` at `t0`.
+    assert_eq!(anim.eased_progress_at(t0), 0.0);
+
+    let progress = anim.eased_progress_at(t0 + Duration::from_millis(9_900));
+    assert!(progress < 1.0, "expected no early snap, got {progress}");
+    assert!((progress - 0.99).abs() < 1e-3, "got {progress}");
+  }
+
+  /// A slide completes once it is within one pixel of the target: at 99.9%
+  /// progress over a 100px slide the residual is 0.1px, so it snaps to 1.0.
+  #[test]
+  fn long_slide_completes_within_one_pixel() {
+    let anim = WindowAnimationState::new_movement(
+      Rect::from_xy(0, 0, 100, 100),
+      Rect::from_xy(100, 0, 100, 100),
+      10_000,
+      linear(),
+    );
+
+    let t0 = Instant::now();
+    assert_eq!(anim.eased_progress_at(t0), 0.0);
+
+    let progress = anim.eased_progress_at(t0 + Duration::from_millis(9_990));
+    assert_eq!(progress, 1.0);
+  }
+
+  /// An opacity-only animation has zero positional travel, so completion falls
+  /// back to the eased fraction: it is incomplete just below 99% and complete
+  /// at/above it.
+  #[test]
+  fn opacity_only_completes_on_eased_fraction() {
+    let anim = WindowAnimationState::new_movement(
+      Rect::from_xy(0, 0, 100, 100),
+      Rect::from_xy(0, 0, 100, 100),
+      100,
+      linear(),
+    );
+
+    let t0 = Instant::now();
+    assert_eq!(anim.eased_progress_at(t0), 0.0);
+
+    let before = anim.eased_progress_at(t0 + Duration::from_millis(98));
+    assert!((before - 0.98).abs() < 1e-3, "got {before}");
+
+    let after = anim.eased_progress_at(t0 + Duration::from_millis(99));
+    assert_eq!(after, 1.0);
+  }
+
+  /// `start_delay` holds the animation at progress 0.0 until the delay elapses
+  /// (used by the window-open paint grace period).
+  #[test]
+  fn start_delay_holds_at_zero() {
+    let anim = WindowAnimationState::new_movement(
+      Rect::from_xy(0, 0, 100, 100),
+      Rect::from_xy(1_000, 0, 100, 100),
+      100,
+      linear(),
+    )
+    .with_delay(Duration::from_millis(30));
+
+    let t0 = Instant::now();
+    // Anchors `start_time`; still within the delay window.
+    assert_eq!(anim.eased_progress_at(t0), 0.0);
+    assert_eq!(anim.eased_progress_at(t0 + Duration::from_millis(20)), 0.0);
+
+    // 30ms in, the duration window has just begun (progress ~0, not snapped).
+    let after_delay =
+      anim.eased_progress_at(t0 + Duration::from_millis(30));
+    assert!(after_delay < 0.01, "got {after_delay}");
+
+    // 30ms delay + 50ms into the 100ms duration → ~50% progress.
+    let mid = anim.eased_progress_at(t0 + Duration::from_millis(80));
+    assert!((mid - 0.5).abs() < 1e-2, "got {mid}");
   }
 }

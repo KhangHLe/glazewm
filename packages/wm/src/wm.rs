@@ -310,7 +310,10 @@ impl WindowManager {
                 window.total_border_delta().map(|d| r.apply_delta(&d, None))
               }) {
                 let window_id = window.id();
-                let _ = window.native().set_cloaked(true);
+
+                // Create and show the surrogate over the still-visible window
+                // first. The surrogate captures the live window as a
+                // pixel-identical overlay, so this is invisible to the user.
                 {
                   let native_ref = window.native();
                   state.animation_manager.start_close_animation(
@@ -322,15 +325,21 @@ impl WindowManager {
                   );
                 }
 
-                // If the surrogate was created successfully, immediately
-                // detach the window from the layout tree so sibling windows
-                // begin their reflow animations in parallel with the close
-                // surrogate. `AnimationManager::update_internal` will send
-                // `WM_CLOSE` once the close animation finishes.
+                // If the surrogate was created successfully, cloak the real
+                // window — now that the surrogate is up and covering it — and
+                // detach it from the layout tree so sibling windows begin
+                // their reflow animations in parallel with the close
+                // surrogate. Cloaking *after* the surrogate is shown avoids a
+                // one-frame gap where the slow `IApplicationView` cloak has
+                // hidden the window but the surrogate has not yet been
+                // composited, which briefly exposes the desktop.
+                // `AnimationManager::update_internal` sends `WM_CLOSE` once the
+                // close animation finishes.
                 if state
                   .animation_manager
                   .has_close_animation(&window_id)
                 {
+                  let _ = window.native().set_cloaked(true);
                   detach_window_for_close(window, state)?;
                   return Ok(());
                 }

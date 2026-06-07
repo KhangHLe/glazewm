@@ -53,6 +53,23 @@ const VSYNC_PIPELINE_OFFSET_US: u64 = 1_500;
 #[cfg(target_os = "windows")]
 const WS_COMPLETE_THRESHOLD_PX: f32 = 1.5;
 
+/// Grace period held at the start of a window-open animation before the
+/// surrogate begins revealing the window.
+///
+/// A freshly created window has often not painted its first frame when the
+/// open animation starts, so its DWM thumbnail is momentarily blank/black —
+/// producing a black box that slides in and "pops" to real content at the
+/// end. Holding the animation at progress `0.0` for this period (the
+/// surrogate stays off-screen for slide/zoom and fully transparent for fade)
+/// gives the app time to paint, so the slide reveals real content from the
+/// first visible frame. Implemented via `WindowAnimationState::start_delay`,
+/// which is measured from the first rendered frame, so the app gets this long
+/// *after* the first animation tick to paint. Roughly two frames at 60 Hz —
+/// long enough to cover the typical first-paint latency without a perceptible
+/// delay in the window appearing.
+#[cfg(target_os = "windows")]
+const OPEN_PAINT_GRACE: Duration = Duration::from_millis(30);
+
 use tokio::sync::mpsc;
 use uuid::Uuid;
 use wm_common::{
@@ -1553,6 +1570,11 @@ impl AnimationManager {
       anim_config.easing.clone(),
     );
 
+    // Hold at progress 0.0 briefly so the new window can paint before the
+    // surrogate reveals it, avoiding a blank/black first frame (see
+    // `OPEN_PAINT_GRACE`).
+    anim.start_delay = OPEN_PAINT_GRACE;
+
     // Zoom open does NOT auto-fade — the surrogate is fully opaque so the
     // small thumbnail is immediately visible as it grows. Fade-in while zooming
     // makes the initial frames invisible (opacity=0 + tiny size = nothing to
@@ -1613,8 +1635,11 @@ impl AnimationManager {
 
   /// Starts a close animation for a window.
   ///
-  /// The real window is expected to be already cloaked by the caller. The
-  /// surrogate style is determined by `window_close.style`:
+  /// The surrogate is created and shown immediately as a pixel-identical
+  /// overlay of the (still-visible) window; the caller cloaks the real window
+  /// only after this returns, so the surrogate is already covering it and no
+  /// gap exposes the desktop. The surrogate style is determined by
+  /// `window_close.style`:
   /// - `Fade`/`Zoom`: surrogate stays at `current_rect`, fades/zooms out.
   /// - Slide styles: surrogate slides off the corresponding screen edge while
   ///   fading. The real window is never repositioned during a close animation.
@@ -1669,7 +1694,8 @@ impl AnimationManager {
       false,
     ) {
       Ok(mut session) => {
-        // Show the surrogate immediately — the real window is already cloaked.
+        // Show the surrogate immediately so it covers the window before the
+        // caller cloaks it (a seamless, pixel-identical handoff).
         session.show();
         session.zoom = is_zoom;
         self.animations.insert(window_id, anim);
