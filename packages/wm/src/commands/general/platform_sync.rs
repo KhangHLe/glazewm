@@ -625,20 +625,26 @@ fn redraw_containers(
       config.value.animations.window_move.enabled
     };
 
-    // Compute effect opacity unconditionally — needed for both the movement
-    // surrogate path and the fade-in path.
+    // Compute effect opacity and corner style unconditionally — needed for
+    // both the movement surrogate path and the fade-in path.
     #[cfg(target_os = "windows")]
-    let effect_opacity = {
+    let (effect_opacity, corner_style) = {
       let effect_cfg = if window.id() == focused_container.id() {
         &config.value.window_effects.focused_window
       } else {
         &config.value.window_effects.other_windows
       };
-      if effect_cfg.transparency.enabled {
+      let opacity = if effect_cfg.transparency.enabled {
         effect_cfg.transparency.opacity.to_alpha()
       } else {
         u8::MAX
-      }
+      };
+      let style = if effect_cfg.corner_style.enabled {
+        effect_cfg.corner_style.style.clone()
+      } else {
+        CornerStyle::Default
+      };
+      (opacity, style)
     };
 
     // Start a slide-in animation for newly appearing tiling windows.
@@ -659,6 +665,7 @@ fn redraw_containers(
         target_rect.clone(),
         monitor_rect,
         effect_opacity,
+        corner_style.clone(),
         config,
         &*native_ref,
       );
@@ -674,6 +681,7 @@ fn redraw_containers(
         window.id(),
         target_rect.clone(),
         effect_opacity,
+        corner_style.clone(),
         config,
         &*native_ref,
       );
@@ -731,6 +739,7 @@ fn redraw_containers(
           previous_target,
           &*native_ref,
           effect_opacity,
+          corner_style.clone(),
           config,
         )
       }
