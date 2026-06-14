@@ -1328,6 +1328,7 @@ impl AnimationManager {
               effect_opacity,
               initially_visible: true,
               corner_style,
+              place_at_top: true,
             },
           ) {
             Ok(session) => {
@@ -1789,6 +1790,7 @@ impl AnimationManager {
         effect_opacity,
         initially_visible: false,
         corner_style,
+        place_at_top: true,
       },
     ) {
       Ok(mut session) => {
@@ -1892,6 +1894,7 @@ impl AnimationManager {
         effect_opacity,
         initially_visible: false,
         corner_style,
+        place_at_top: false,
       },
     ) {
       Ok(mut session) => {
@@ -2065,6 +2068,7 @@ impl AnimationManager {
             effect_opacity,
             initially_visible: true,
             corner_style,
+            place_at_top: true,
           },
         ) {
           Ok(session) => {
