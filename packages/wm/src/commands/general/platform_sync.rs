@@ -12,7 +12,7 @@ use wm_platform::{CornerStyle, OpacityValue};
 use wm_platform::{Rect, WindowZOrder};
 
 use crate::{
-  models::{Container, WindowContainer},
+  models::{Container, WindowContainer, Workspace},
   traits::{CommonGetters, PositionGetters, WindowGetters},
   user_config::UserConfig,
   wm_state::WmState,
@@ -220,13 +220,14 @@ fn redraw_containers(
       .map(|(_, hide_corner)| hide_corner)
       .context("Monitor not found in hide corner map.")?;
 
-    // Whether the window should be shown above all other windows.
+    // Whether the window should be shown above all other windows. `None`
+    // leaves the window's current z-order untouched.
     let z_order = match window.state() {
       WindowState::Floating(config) if config.shown_on_top => {
-        WindowZOrder::TopMost
+        shown_on_top_z_order(window, &workspace)
       }
       WindowState::Fullscreen(config) if config.shown_on_top => {
-        WindowZOrder::TopMost
+        shown_on_top_z_order(window, &workspace)
       }
       _ if should_bring_to_front => {
         let focused_descendant = workspace
@@ -236,15 +237,17 @@ fn redraw_containers(
 
         if let Some(focused_descendant) = focused_descendant {
           if window.id() == focused_descendant.id() {
-            WindowZOrder::Normal
+            Some(WindowZOrder::Normal)
           } else {
-            WindowZOrder::AfterWindow(focused_descendant.native().id())
+            Some(WindowZOrder::AfterWindow(
+              focused_descendant.native().id(),
+            ))
           }
         } else {
-          WindowZOrder::Normal
+          Some(WindowZOrder::Normal)
         }
       }
-      _ => WindowZOrder::Normal,
+      _ => Some(WindowZOrder::Normal),
     };
 
     // Set the z-order of the window.
@@ -253,10 +256,12 @@ fn redraw_containers(
     // of a window. See `NativeWindow::raise` for more details.
     #[cfg(target_os = "windows")]
     if should_bring_to_front && !windows_to_redraw.contains(window) {
-      tracing::info!("Updating window z-order: {window}");
+      if let Some(z_order) = &z_order {
+        tracing::info!("Updating window z-order: {window}");
 
-      if let Err(err) = window.native().set_z_order(&z_order) {
-        tracing::warn!("Failed to set window z-order: {}", err);
+        if let Err(err) = window.native().set_z_order(z_order) {
+          tracing::warn!("Failed to set window z-order: {}", err);
+        }
       }
     }
 
@@ -285,9 +290,13 @@ fn redraw_containers(
       DisplayState::Showing | DisplayState::Shown
     );
 
-    if let Err(err) =
-      reposition_window(window, *hide_corner, &z_order, is_visible, config)
-    {
+    if let Err(err) = reposition_window(
+      window,
+      *hide_corner,
+      z_order.as_ref(),
+      is_visible,
+      config,
+    ) {
       tracing::warn!("Failed to set window position: {}", err);
     }
 
@@ -335,12 +344,44 @@ fn redraw_containers(
   Ok(())
 }
 
+/// Gets the z-order for a window that's configured to be shown on top.
+///
+/// Only the workspace's focused window gets raised to the top of the
+/// topmost band. Other windows that are already topmost keep their band
+/// membership without being re-raised (`None` = leave the z-order
+/// untouched), so the focused window reliably stays above unfocused
+/// shown-on-top windows.
+fn shown_on_top_z_order(
+  window: &WindowContainer,
+  workspace: &Workspace,
+) -> Option<WindowZOrder> {
+  let is_focused_in_workspace = workspace
+    .descendant_focus_order()
+    .next()
+    .is_some_and(|focused| focused.id() == window.id());
+
+  #[cfg(target_os = "windows")]
+  let is_already_topmost = {
+    use wm_platform::WS_EX_TOPMOST;
+    window.native().has_window_style_ex(WS_EX_TOPMOST)
+  };
+
+  #[cfg(not(target_os = "windows"))]
+  let is_already_topmost = false;
+
+  if is_focused_in_workspace || !is_already_topmost {
+    Some(WindowZOrder::TopMost)
+  } else {
+    None
+  }
+}
+
 fn reposition_window(
   window: &WindowContainer,
   hide_corner: HideCorner,
   // LINT: `z_order` is only used on Windows.
   #[cfg_attr(not(target_os = "windows"), allow(unused_variables))]
-  z_order: &WindowZOrder,
+  z_order: Option<&WindowZOrder>,
   is_visible: bool,
   config: &UserConfig,
 ) -> anyhow::Result<()> {
@@ -394,7 +435,7 @@ fn reposition_window(
     {
       use wm_platform::{
         SWP_ASYNCWINDOWPOS, SWP_FRAMECHANGED, SWP_NOACTIVATE,
-        SWP_NOCOPYBITS, SWP_NOSENDCHANGING, WS_MAXIMIZEBOX,
+        SWP_NOCOPYBITS, SWP_NOSENDCHANGING, SWP_NOZORDER, WS_MAXIMIZEBOX,
       };
 
       // Restore window if it's minimized/maximized and shouldn't be. This
@@ -425,6 +466,14 @@ fn reposition_window(
         | SWP_NOCOPYBITS
         | SWP_NOSENDCHANGING
         | SWP_ASYNCWINDOWPOS;
+
+      // Leave the window's current z-order unchanged when no z-order is
+      // given.
+      if z_order.is_none() {
+        swp_flags |= SWP_NOZORDER;
+      }
+
+      let z_order = z_order.unwrap_or(&WindowZOrder::Normal);
 
       match &window.state() {
         WindowState::Minimized => {
