@@ -73,6 +73,10 @@ pub struct GeneralConfig {
   /// Config for automatically moving the cursor.
   pub cursor_jump: CursorJumpConfig,
 
+  /// Config for moving windows by holding a modifier key and dragging
+  /// with the mouse from anywhere on the window.
+  pub grab_and_move: GrabAndMoveConfig,
+
   /// Whether to automatically set the focused tiling window's insertion
   /// direction based on its aspect ratio.
   pub auto_set_tiling_direction: bool,
@@ -106,6 +110,7 @@ impl Default for GeneralConfig {
   fn default() -> Self {
     GeneralConfig {
       cursor_jump: CursorJumpConfig::default(),
+      grab_and_move: GrabAndMoveConfig::default(),
       auto_set_tiling_direction: false,
       focus_follows_cursor: false,
       toggle_workspace_on_refocus: true,
@@ -125,6 +130,25 @@ impl Default for GeneralConfig {
       show_all_in_taskbar: false,
     }
   }
+}
+
+#[derive(Clone, Debug, Default, Deserialize, Serialize)]
+#[serde(default, rename_all(serialize = "camelCase"))]
+pub struct GrabAndMoveConfig {
+  /// Whether holding the modifier key and left-dragging anywhere on a
+  /// managed window moves it (as if dragged by its title bar).
+  pub enabled: bool,
+
+  /// Modifier key that activates a drag.
+  pub modifier: GrabAndMoveModifier,
+}
+
+#[derive(Clone, Debug, Default, Deserialize, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum GrabAndMoveModifier {
+  #[default]
+  Alt,
+  Win,
 }
 
 #[derive(Clone, Debug, Default, Deserialize, Serialize)]
