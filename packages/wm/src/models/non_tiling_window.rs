@@ -10,7 +10,7 @@ use wm_common::{
   ActiveDrag, ContainerDto, DisplayState, GapsConfig, WindowDto,
   WindowRuleConfig, WindowState,
 };
-use wm_platform::{NativeWindow, Rect, RectDelta};
+use wm_platform::{NativeWindow, OpacityValue, Rect, RectDelta};
 
 use crate::{
   impl_common_getters, impl_container_debug, impl_window_getters,
@@ -42,6 +42,7 @@ struct NonTilingWindowInner {
   has_custom_floating_placement: bool,
   done_window_rules: Vec<WindowRuleConfig>,
   active_drag: Option<ActiveDrag>,
+  transparency_pin: Option<OpacityValue>,
 }
 
 impl NonTilingWindow {
@@ -58,6 +59,7 @@ impl NonTilingWindow {
     has_custom_floating_placement: bool,
     done_window_rules: Vec<WindowRuleConfig>,
     active_drag: Option<ActiveDrag>,
+    transparency_pin: Option<OpacityValue>,
   ) -> Self {
     let window = NonTilingWindowInner {
       id: id.unwrap_or_else(Uuid::new_v4),
@@ -76,6 +78,7 @@ impl NonTilingWindow {
       has_custom_floating_placement,
       done_window_rules,
       active_drag,
+      transparency_pin,
     };
 
     Self(Rc::new(RefCell::new(window)))
@@ -110,6 +113,7 @@ impl NonTilingWindow {
       gaps_config,
       self.done_window_rules(),
       self.active_drag(),
+      self.transparency_pin(),
     )
   }
 
@@ -137,6 +141,7 @@ impl NonTilingWindow {
       class_name: self.native_properties().class_name,
       process_name: self.native_properties().process_name,
       active_drag: self.active_drag(),
+      transparency_pin: self.transparency_pin(),
     }))
   }
 }

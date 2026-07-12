@@ -10,7 +10,7 @@ use wm_common::{
   ActiveDrag, ContainerDto, DisplayState, GapsConfig, TilingDirection,
   WindowDto, WindowRuleConfig, WindowState,
 };
-use wm_platform::{NativeWindow, Rect, RectDelta};
+use wm_platform::{NativeWindow, OpacityValue, Rect, RectDelta};
 
 use crate::{
   impl_common_getters, impl_container_debug,
@@ -48,6 +48,7 @@ struct TilingWindowInner {
   gaps_config: GapsConfig,
   done_window_rules: Vec<WindowRuleConfig>,
   active_drag: Option<ActiveDrag>,
+  transparency_pin: Option<OpacityValue>,
 }
 
 impl TilingWindow {
@@ -63,6 +64,7 @@ impl TilingWindow {
     gaps_config: GapsConfig,
     done_window_rules: Vec<WindowRuleConfig>,
     active_drag: Option<ActiveDrag>,
+    transparency_pin: Option<OpacityValue>,
   ) -> Self {
     let window = TilingWindowInner {
       id: id.unwrap_or_else(Uuid::new_v4),
@@ -82,6 +84,7 @@ impl TilingWindow {
       gaps_config,
       done_window_rules,
       active_drag,
+      transparency_pin,
     };
 
     Self(Rc::new(RefCell::new(window)))
@@ -104,6 +107,7 @@ impl TilingWindow {
       self.has_custom_floating_placement(),
       self.done_window_rules(),
       self.active_drag(),
+      self.transparency_pin(),
     )
   }
 
@@ -131,6 +135,7 @@ impl TilingWindow {
       class_name: self.native_properties().class_name,
       process_name: self.native_properties().process_name,
       active_drag: self.active_drag(),
+      transparency_pin: self.transparency_pin(),
     }))
   }
 }

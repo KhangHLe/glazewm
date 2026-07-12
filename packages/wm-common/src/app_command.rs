@@ -231,6 +231,10 @@ pub enum InvokeCommand {
   ToggleMinimized,
   ToggleTiling,
   ToggleTilingDirection,
+  ToggleTransparencyPin {
+    #[clap(long)]
+    opacity: Option<OpacityValue>,
+  },
   SetTilingDirection {
     #[clap(required = true)]
     tiling_direction: TilingDirection,

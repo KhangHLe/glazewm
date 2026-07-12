@@ -1,6 +1,6 @@
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
-use wm_platform::{Rect, RectDelta};
+use wm_platform::{OpacityValue, Rect, RectDelta};
 
 use crate::{ActiveDrag, DisplayState, WindowState};
 
@@ -29,4 +29,5 @@ pub struct WindowDto {
   pub class_name: String,
   pub process_name: String,
   pub active_drag: Option<ActiveDrag>,
+  pub transparency_pin: Option<OpacityValue>,
 }

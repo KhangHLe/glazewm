@@ -2,7 +2,9 @@ use std::cell::Ref;
 
 use ambassador::delegatable_trait;
 use wm_common::{ActiveDrag, DisplayState, WindowRuleConfig, WindowState};
-use wm_platform::{LengthValue, NativeWindow, Rect, RectDelta};
+use wm_platform::{
+  LengthValue, NativeWindow, OpacityValue, Rect, RectDelta,
+};
 
 use crate::{
   models::{NativeWindowProperties, Workspace},
@@ -159,6 +161,16 @@ pub trait WindowGetters: CommonGetters {
 
   fn set_active_drag(&self, active_drag: Option<ActiveDrag>);
 
+  /// Gets the pinned transparency for the window, if any.
+  ///
+  /// A pinned transparency overrides the focused/other window
+  /// transparency effects from the user config until unpinned.
+  // LINT: `transparency_pin` is only used on Windows.
+  #[allow(unused)]
+  fn transparency_pin(&self) -> Option<OpacityValue>;
+
+  fn set_transparency_pin(&self, transparency_pin: Option<OpacityValue>);
+
   /// Gets the cached native window properties.
   fn native_properties(&self) -> NativeWindowProperties;
 
@@ -172,7 +184,8 @@ pub trait WindowGetters: CommonGetters {
 ///
 /// Expects that the struct has a wrapping `RefCell` containing a struct
 /// with a `state`, `prev_state`, `native`, `has_pending_dpi_adjustment`,
-/// `border_delta`, `display_state`, and a `done_window_rules` field.
+/// `border_delta`, `display_state`, `done_window_rules`, and a
+/// `transparency_pin` field.
 #[macro_export]
 macro_rules! impl_window_getters {
   ($struct_name:ident) => {
@@ -191,6 +204,19 @@ macro_rules! impl_window_getters {
 
       fn set_prev_state(&self, state: WindowState) {
         self.0.borrow_mut().prev_state = Some(state);
+      }
+
+      // LINT: `transparency_pin` is only used on Windows.
+      #[allow(unused)]
+      fn transparency_pin(&self) -> Option<OpacityValue> {
+        self.0.borrow().transparency_pin.clone()
+      }
+
+      fn set_transparency_pin(
+        &self,
+        transparency_pin: Option<OpacityValue>,
+      ) {
+        self.0.borrow_mut().transparency_pin = transparency_pin;
       }
 
       fn native(&self) -> Ref<'_, NativeWindow> {

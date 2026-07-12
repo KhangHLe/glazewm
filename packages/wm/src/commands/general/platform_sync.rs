@@ -608,7 +608,13 @@ fn apply_transparency_effect(
   window: &WindowContainer,
   effect_config: &WindowEffectConfig,
 ) {
-  let transparency = if effect_config.transparency.enabled {
+  // A pinned transparency (via the `toggle-transparency-pin` command)
+  // overrides the configured transparency effect until unpinned.
+  let transparency_pin = window.transparency_pin();
+
+  let transparency = if let Some(pin) = &transparency_pin {
+    pin
+  } else if effect_config.transparency.enabled {
     &effect_config.transparency.opacity
   } else {
     // Reset the transparency to default.

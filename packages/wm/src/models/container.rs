@@ -10,7 +10,9 @@ use wm_common::{
   ActiveDrag, ContainerDto, DisplayState, GapsConfig, TilingDirection,
   WindowRuleConfig, WindowState,
 };
-use wm_platform::{Direction, NativeWindow, Rect, RectDelta};
+use wm_platform::{
+  Direction, NativeWindow, OpacityValue, Rect, RectDelta,
+};
 
 #[allow(clippy::wildcard_imports)]
 use crate::{

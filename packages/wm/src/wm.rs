@@ -13,6 +13,8 @@ use wm_platform::NativeWindowWindowsExt;
 use wm_platform::{
   Dispatcher, LengthValue, PlatformEvent, RectDelta, WindowEvent,
 };
+#[cfg(target_os = "windows")]
+use wm_platform::OpacityValue;
 
 use crate::{
   commands::{
@@ -726,6 +728,33 @@ impl WindowManager {
               state,
               config,
             )?;
+
+            Ok(())
+          }
+          _ => Ok(()),
+        }
+      }
+      // LINT: `opacity` is only used on Windows.
+      #[cfg_attr(not(target_os = "windows"), allow(unused_variables))]
+      InvokeCommand::ToggleTransparencyPin { opacity } => {
+        match subject_container.as_window_container() {
+          #[cfg(target_os = "windows")]
+          Ok(window) => {
+            if window.transparency_pin().is_some() {
+              // Unpin. Queue an effects update so the window reverts to
+              // the transparency from the user's `window_effects` config.
+              window.set_transparency_pin(None);
+              state.pending_sync.queue_all_effects_update();
+            } else {
+              // Pin at the given opacity (fully opaque if omitted). The
+              // pin overrides transparency effects until unpinned.
+              let opacity = opacity
+                .clone()
+                .unwrap_or_else(|| OpacityValue::from_alpha(u8::MAX));
+
+              _ = window.native().set_transparency(&opacity);
+              window.set_transparency_pin(Some(opacity));
+            }
 
             Ok(())
           }

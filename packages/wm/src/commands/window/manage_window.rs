@@ -224,6 +224,7 @@ fn create_window(
       gaps_config,
       Vec::new(),
       None,
+      None,
     )
     .into(),
     _ => NonTilingWindow::new(
@@ -237,6 +238,7 @@ fn create_window(
       floating_placement,
       !prefers_centered,
       Vec::new(),
+      None,
       None,
     )
     .into(),
