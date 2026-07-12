@@ -1,0 +1,8 @@
+﻿cargo :    Compiling wm v0.0.0 (C:\Users\KL94\git\glazewm\packages\wm)
+At line:1 char:31
++ ... d C:\Users\KL94\git\glazewm; cargo build --release -p wm 2>&1 | Out-F ...
++                                  ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+    + CategoryInfo          : NotSpecified: (   Compiling wm...wm\packages\wm):String) [], RemoteException
+    + FullyQualifiedErrorId : NativeCommandError
+ 
+    Finished `release` profile [optimized] target(s) in 10.96s

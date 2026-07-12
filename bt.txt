@@ -1,0 +1,105 @@
+﻿cargo :    Compiling syn v2.0.103
+At line:1 char:31
++ cd C:\Users\KL94\git\glazewm; cargo test -p wm --release 2>&1 | Out-F ...
++                               ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+    + CategoryInfo          : NotSpecified: (   Compiling syn v2.0.103:String) [], RemoteException
+    + FullyQualifiedErrorId : NativeCommandError
+ 
+   Compiling strsim v0.11.1
+   Compiling wm-platform v0.0.0 (C:\Users\KL94\git\glazewm\packages\wm-platform)
+   Compiling ident_case v1.0.1
+   Compiling prettyplease v0.2.34
+   Compiling rustversion v1.0.21
+   Compiling darling_core v0.23.0
+   Compiling serde_derive v1.0.219
+   Compiling thiserror-impl v2.0.12
+   Compiling tracing-attributes v0.1.29
+   Compiling tokio-macros v2.5.0
+   Compiling equator-macro v0.4.2
+   Compiling thiserror-impl v1.0.69
+   Compiling windows-implement v0.52.0
+   Compiling windows-interface v0.52.0
+   Compiling futures-macro v0.3.31
+   Compiling profiling-procmacros v1.0.17
+   Compiling clap_derive v4.5.40
+   Compiling profiling v1.0.17
+   Compiling num-derive v0.4.2
+   Compiling windows v0.52.0
+   Compiling tokio v1.45.1
+   Compiling equator v0.4.2
+   Compiling fax_derive v0.2.0
+   Compiling futures-util v0.3.31
+   Compiling aligned-vec v0.6.4
+   Compiling thiserror v1.0.69
+   Compiling tracing v0.1.41
+   Compiling v_frame v0.3.9
+   Compiling arg_enum_proc_macro v0.3.4
+   Compiling thiserror v2.0.12
+   Compiling fax v0.2.6
+   Compiling auto-launch v0.5.0
+   Compiling tungstenite v0.26.2
+   Compiling av1-grain v0.2.4
+   Compiling tiff v0.10.3
+   Compiling tracing-subscriber v0.3.19
+   Compiling enum-as-inner v0.6.1
+   Compiling wm-macros v0.1.0 (C:\Users\KL94\git\glazewm\packages\wm-macros)
+   Compiling rav1e v0.7.1
+   Compiling clap v4.5.40
+   Compiling darling_macro v0.23.0
+   Compiling serde v1.0.219
+   Compiling darling v0.23.0
+   Compiling bon-macros v3.9.1
+   Compiling tracing-appender v0.2.3
+   Compiling bitflags v2.9.1
+   Compiling serde_json v1.0.140
+   Compiling uuid v1.17.0
+   Compiling serde_yaml v0.9.34+deprecated
+   Compiling keyboard-types v0.7.0
+   Compiling png v0.18.0
+   Compiling tokio-tungstenite v0.26.2
+   Compiling muda v0.17.1
+   Compiling bon v3.9.1
+   Compiling shell-util v0.0.0
+   Compiling ravif v0.11.20
+   Compiling tray-icon v0.21.1
+   Compiling image v0.25.8
+   Compiling wm-common v0.0.0 (C:\Users\KL94\git\glazewm\packages\wm-common)
+   Compiling wm-ipc-client v0.0.0 (C:\Users\KL94\git\glazewm\packages\wm-ipc-client)
+   Compiling wm-cli v0.0.0 (C:\Users\KL94\git\glazewm\packages\wm-cli)
+   Compiling wm v0.0.0 (C:\Users\KL94\git\glazewm\packages\wm)
+    Finished `release` profile [optimized] target(s) in 44.93s
+     Running unittests src\main.rs (target\release\deps\glazewm-aeb7dc5d2841daf2.exe)
+
+running 14 tests
+test animation::engine::tests::test_animation_progress ... ok
+test animation::engine::tests::test_interpolate_rect ... ok
+test animation::state::tests::long_slide_completes_within_one_pixel ... ok
+test animation::state::tests::opacity_only_completes_on_eased_fraction ... ok
+test animation::state::tests::long_slide_does_not_snap_at_ninety_nine_percent ... ok
+test animation::state::tests::start_delay_holds_at_zero ... ok
+test events::handle_window_moved_or_resized::tests::matches_corner_positions ... ok
+test events::handle_window_moved_or_resized::tests::does_not_match_non_corner_positions ... ok
+test wm::tests::chooses_horizontal_for_wider_windows ... ok
+test wm::tests::chooses_vertical_for_taller_windows ... ok
+test wm::tests::skips_square_windows ... ok
+test wm::tests::extracts_window_id_from_supported_events ... ok
+test user_config::tests::legacy_style_keys_parse ... FAILED
+test user_config::tests::sample_config_parses ... ok
+
+failures:
+
+---- user_config::tests::legacy_style_keys_parse stdout ----
+
+thread 'user_config::tests::legacy_style_keys_parse' (5896) panicked at packages\wm\src\user_config.rs:451:5:
+assertion `left == right` failed
+  left: SlideRight
+ right: SlideTop
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+
+failures:
+    user_config::tests::legacy_style_keys_parse
+
+test result: FAILED. 13 passed; 1 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.01s
+
+error: test failed, to rerun pass `-p wm --bin glazewm`
