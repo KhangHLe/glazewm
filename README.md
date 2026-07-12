@@ -328,10 +328,22 @@ window_behavior:
       # Whether to show floating windows as always on top.
       shown_on_top: false
 
+      # Transparency to apply to floating windows. When enabled, takes
+      # precedence over the focused/other window transparency effects.
+      transparency:
+        enabled: false
+        opacity: '95%'
+
     fullscreen:
       # Maximize the window if possible. If the window doesn't have a
       # maximize button, then it'll be made fullscreen normally instead.
       maximized: false
+
+      # Transparency to apply to fullscreen windows. When enabled, takes
+      # precedence over the focused/other window transparency effects.
+      transparency:
+        enabled: false
+        opacity: '100%'
 ```
 
 ### Config: Binding modes

@@ -599,9 +599,31 @@ fn apply_window_effects(
   #[cfg(target_os = "windows")]
   if window_effects.focused_window.transparency.enabled
     || window_effects.other_windows.transparency.enabled
+    || window_transparency_override(window).is_some()
   {
     apply_transparency_effect(window, effect_config);
   }
+}
+
+/// Gets the transparency override for a window, if any.
+///
+/// A pinned transparency (via the `toggle-transparency-pin` command)
+/// takes the highest precedence, followed by the transparency from the
+/// window's floating/fullscreen state config. Both override the
+/// focused/other window transparency effects.
+#[cfg(target_os = "windows")]
+fn window_transparency_override(
+  window: &WindowContainer,
+) -> Option<OpacityValue> {
+  window.transparency_pin().or_else(|| match window.state() {
+    WindowState::Floating(config) if config.transparency.enabled => {
+      Some(config.transparency.opacity)
+    }
+    WindowState::Fullscreen(config) if config.transparency.enabled => {
+      Some(config.transparency.opacity)
+    }
+    _ => None,
+  })
 }
 
 #[cfg(target_os = "windows")]
@@ -657,12 +679,12 @@ fn apply_transparency_effect(
   window: &WindowContainer,
   effect_config: &WindowEffectConfig,
 ) {
-  // A pinned transparency (via the `toggle-transparency-pin` command)
-  // overrides the configured transparency effect until unpinned.
-  let transparency_pin = window.transparency_pin();
+  // A transparency override (pin or floating/fullscreen state
+  // transparency) takes precedence over the focused/other effect.
+  let transparency_override = window_transparency_override(window);
 
-  let transparency = if let Some(pin) = &transparency_pin {
-    pin
+  let transparency = if let Some(transparency) = &transparency_override {
+    transparency
   } else if effect_config.transparency.enabled {
     &effect_config.transparency.opacity
   } else {

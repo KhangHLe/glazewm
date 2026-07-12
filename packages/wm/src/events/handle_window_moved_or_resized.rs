@@ -473,7 +473,7 @@ fn update_drag_state(
         window.clone(),
         WindowState::Floating(FloatingStateConfig {
           centered: false,
-          ..config.value.window_behavior.state_defaults.floating
+          ..config.value.window_behavior.state_defaults.floating.clone()
         }),
         state,
         config,

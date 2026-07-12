@@ -203,6 +203,10 @@ pub struct FloatingStateConfig {
 
   /// Whether to show floating windows as always on top.
   pub shown_on_top: bool,
+
+  /// Transparency to apply to floating windows. When enabled, takes
+  /// precedence over the focused/other window transparency effects.
+  pub transparency: TransparencyEffectConfig,
 }
 
 impl Default for FloatingStateConfig {
@@ -210,6 +214,7 @@ impl Default for FloatingStateConfig {
     FloatingStateConfig {
       centered: true,
       shown_on_top: false,
+      transparency: TransparencyEffectConfig::default(),
     }
   }
 }
@@ -222,6 +227,10 @@ pub struct FullscreenStateConfig {
 
   /// Whether to show fullscreen windows as always on top.
   pub shown_on_top: bool,
+
+  /// Transparency to apply to fullscreen windows. When enabled, takes
+  /// precedence over the focused/other window transparency effects.
+  pub transparency: TransparencyEffectConfig,
 }
 
 impl Default for FullscreenStateConfig {
@@ -229,6 +238,7 @@ impl Default for FullscreenStateConfig {
     FullscreenStateConfig {
       maximized: true,
       shown_on_top: false,
+      transparency: TransparencyEffectConfig::default(),
     }
   }
 }
@@ -300,7 +310,7 @@ pub struct CornerEffectConfig {
   pub style: CornerStyle,
 }
 
-#[derive(Clone, Debug, Default, Deserialize, Serialize)]
+#[derive(Clone, Debug, Default, Deserialize, PartialEq, Serialize)]
 #[serde(default, rename_all(serialize = "camelCase"))]
 pub struct TransparencyEffectConfig {
   /// Whether to enable the effect.

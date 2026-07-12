@@ -29,10 +29,16 @@ pub fn update_window_state(
 
   info!("Updating window state: {:?}.", target_state);
 
-  match target_state {
+  let window = match target_state {
     WindowState::Tiling => set_tiling(&window, state, config),
     _ => set_non_tiling(window, target_state, state),
-  }
+  }?;
+
+  // Refresh window effects after the state change (e.g. transparency
+  // from the new state's config).
+  state.pending_sync.queue_all_effects_update();
+
+  Ok(window)
 }
 
 /// Updates the state of a window to be `WindowState::Tiling`.

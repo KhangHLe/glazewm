@@ -562,6 +562,7 @@ impl WindowManager {
               centered,
               shown_on_top: shown_on_top
                 .unwrap_or(floating_defaults.shown_on_top),
+              transparency: floating_defaults.transparency.clone(),
             }),
             state,
             config,
@@ -613,6 +614,7 @@ impl WindowManager {
                 .unwrap_or(fullscreen_defaults.maximized),
               shown_on_top: shown_on_top
                 .unwrap_or(fullscreen_defaults.shown_on_top),
+              transparency: fullscreen_defaults.transparency.clone(),
             }),
             state,
             config,
@@ -713,6 +715,7 @@ impl WindowManager {
             centered,
             shown_on_top: shown_on_top
               .unwrap_or(floating_defaults.shown_on_top),
+            transparency: floating_defaults.transparency.clone(),
           });
 
           let window = update_window_state(
@@ -748,6 +751,7 @@ impl WindowManager {
                 .unwrap_or(fullscreen_defaults.maximized),
               shown_on_top: shown_on_top
                 .unwrap_or(fullscreen_defaults.shown_on_top),
+              transparency: fullscreen_defaults.transparency.clone(),
             });
 
           update_window_state(
