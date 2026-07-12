@@ -1,5 +1,7 @@
 <div align="center">
 
+> **This is [KhangHLe's fork](https://github.com/KhangHLe/glazewm)** — upstream GlazeWM plus features built here (and upstream PRs merged early). See [Fork features](#fork-features) below. Install via the fork's [releases](https://github.com/KhangHLe/glazewm/releases).
+
 > V3 is finally out - check out the changelog [here](https://github.com/glzr-io/GlazeWM/releases) 🔥
 
   <br>
@@ -33,6 +35,33 @@ GlazeWM lets you easily organize windows and adjust their layout on the fly by u
 - Customizable rules for specific windows
 - Easy one-click installation
 - Integration with [Zebar](https://github.com/glzr-io/zebar) as a status bar
+
+## Fork features
+
+Everything below is on top of upstream, config-compatible (all additions are opt-in):
+
+- **Grab-and-move** — hold a modifier (`alt` or `win`) and left-drag from *anywhere* on a window to move it, exactly like a title-bar drag: tiling windows reflow on drop, `ignore`d windows (e.g. games) are untouched. The only mouse-move path for title-bar-less windows (terminals, custom-frame apps — which ignore the classic `WM_NCLBUTTONDOWN`/`SC_MOVE` delegation tricks entirely; this moves them directly).
+
+  ```yaml
+  general:
+    grab_and_move:
+      enabled: true
+      modifier: 'alt'
+  ```
+
+- **Window & workspace animations** — upstream [PR #1392](https://github.com/glzr-io/glazewm/pull/1392) (by @florensm, building on @sagezaugg's #1199) merged early: DWM-thumbnail-surrogate move/resize animations (the real window moves once — no per-frame cross-process `SetWindowPos`), open slide-ins, workspace-switch slide/fade/zoom/iris, cubic-bezier + spring easing. Disabled by default; see the `animations` block in the [sample config](./resources/assets/sample-config.yaml). Known issue inherited from the PR: the legacy `direction:` alias mis-parses — use the modern `style:` keys.
+
+- **`toggle-transparency-pin [--opacity <v>]`** — pin a window at fixed opacity, immune to focused/other transparency effects.
+
+- **Per-monitor workspace addressing** — `focus`/`move` `--workspace-on-monitor <name>` (Komorebi-style): with workspaces `1a`/`1b` bound to different monitors, one keybinding acts on the focused monitor natively.
+
+- **`general.auto_set_tiling_direction`** — aspect-ratio autotiling (upstream draft [PR #1379](https://github.com/glzr-io/glazewm/pull/1379), finished here).
+
+- **`window_behavior.state_defaults.{floating,fullscreen}.transparency`** — per-state transparency. Precedence: pin → state transparency → focused/other effects → opaque.
+
+- **Focused-above-unfocused topmost fix** — only the workspace's focused window is raised within the always-on-top band, fixing z-order flicker between shown-on-top floats.
+
+- **Drag-drop tree fix** — drop targets are resolved after the tiling conversion mutates the container tree, fixing "No common ancestor" errors + orphaned windows on drops with no re-tile target (submitted upstream).
 
 ## Installation
 
@@ -378,7 +407,7 @@ Right-click the GlazeWM icon in the system tray and select "Run on system startu
 
 **Q: How can I create `<insert layout>`?**
 
-You can create custom layouts by changing the tiling direction with `alt+v`. This changes where the next window is placed _in relation to the current window_. If the current window's direction is horizontal, the new window will be placed to the right of it. If it is vertical, it will be placed below it. This also applies when moving windows; the tiling direction of the stationary window will affect where the moved window will be placed.
+You can create custom layouts by changing the tiling direction with `alt+v`. This changes where the next window is placed *in relation to the current window*. If the current window's direction is horizontal, the new window will be placed to the right of it. If it is vertical, it will be placed below it. This also applies when moving windows; the tiling direction of the stationary window will affect where the moved window will be placed.
 
 Community-made scripts like [Dutch-Raptor/GAT-GWM](https://github.com/Dutch-Raptor/GAT-GWM) and [burgr033/GlazeWM-autotiling-python](https://github.com/burgr033/GlazeWM-autotiling-python) can be used to automatically change the tiling direction. Native support is also available through `general.auto_set_tiling_direction`.
 
