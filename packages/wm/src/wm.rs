@@ -290,6 +290,14 @@ impl WindowManager {
           )?;
         }
 
+        if let Some(name) = &args.workspace_on_monitor {
+          focus_workspace(
+            WorkspaceTarget::NameOnMonitor(name.clone()),
+            state,
+            config,
+          )?;
+        }
+
         if let Some(monitor_index) = &args.monitor {
           focus_monitor(*monitor_index, state, config)?;
         }
@@ -363,6 +371,15 @@ impl WindowManager {
               move_window_to_workspace(
                 window.clone(),
                 WorkspaceTarget::Name(name.clone()),
+                state,
+                config,
+              )?;
+            }
+
+            if let Some(name) = &args.workspace_on_monitor {
+              move_window_to_workspace(
+                window.clone(),
+                WorkspaceTarget::NameOnMonitor(name.clone()),
                 state,
                 config,
               )?;

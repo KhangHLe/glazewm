@@ -326,6 +326,9 @@ pub struct InvokeFocusCommand {
   pub workspace: Option<String>,
 
   #[clap(long)]
+  pub workspace_on_monitor: Option<String>,
+
+  #[clap(long)]
   pub monitor: Option<usize>,
 
   #[clap(long)]
@@ -365,6 +368,11 @@ pub struct InvokeMoveCommand {
   /// Name of workspace to move the window.
   #[clap(long)]
   pub workspace: Option<String>,
+
+  /// Name or display name of a workspace on the window's monitor to
+  /// move the window to.
+  #[clap(long)]
+  pub workspace_on_monitor: Option<String>,
 
   #[clap(long)]
   pub next_active_workspace: bool,

@@ -375,6 +375,57 @@ impl WmState {
           true => (None, None),
         }
       }
+      WorkspaceTarget::NameOnMonitor(name) => {
+        let monitor = origin_workspace
+          .monitor()
+          .context("No monitor in workspace.")?;
+
+        // Match by workspace name or display name among the active
+        // workspaces on the origin workspace's monitor.
+        let workspace_match =
+          monitor.workspaces().into_iter().find(|workspace| {
+            let workspace_config = workspace.config();
+            workspace_config.name == name
+              || workspace_config.display_name.as_ref() == Some(&name)
+          });
+
+        match workspace_match {
+          Some(workspace) => {
+            #[allow(clippy::match_bool)]
+            match origin_workspace.id() == workspace.id() {
+              false => (Some(workspace.config().name), Some(workspace)),
+              // Toggle the workspace if it's already focused.
+              true if config.value.general.toggle_workspace_on_refocus => (
+                self.recent_workspace_name.clone(),
+                self
+                  .recent_workspace_name
+                  .as_ref()
+                  .and_then(|name| self.workspace_by_name(name)),
+              ),
+              true => (None, None),
+            }
+          }
+          // Fall back to inactive workspace configs that are bound to
+          // the origin workspace's monitor.
+          None => {
+            let config_match =
+              config.value.workspaces.iter().find(|workspace_config| {
+                workspace_config
+                  .bind_to_monitor
+                  .is_some_and(|index| index as usize == monitor.index())
+                  && (workspace_config.name == name
+                    || workspace_config.display_name.as_ref()
+                      == Some(&name))
+              });
+
+            (
+              config_match
+                .map(|workspace_config| workspace_config.name.clone()),
+              None,
+            )
+          }
+        }
+      }
       WorkspaceTarget::Recent => (
         self.recent_workspace_name.clone(),
         self
