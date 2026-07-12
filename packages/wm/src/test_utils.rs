@@ -163,6 +163,7 @@ impl NonTilingWindow {
       false,
       vec![],
       None,
+      None,
     )
   }
 }
@@ -215,6 +216,7 @@ impl TilingWindow {
       false,
       gaps_config,
       vec![],
+      None,
       None,
     );
 
