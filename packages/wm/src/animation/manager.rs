@@ -783,6 +783,21 @@ impl AnimationManager {
       }
     }
 
+    // Hand opacity ownership back to the window-effects system. Animations
+    // write transparency directly onto the real window (opacity-style focus
+    // animations per frame; open/zoom fades via `opacity_from`), and nothing
+    // else resets it afterward — `apply_window_effects` only runs on
+    // focused/all effect updates, so a window whose animation ended without
+    // an accompanying focus change stayed at whatever opacity the last
+    // animated frame wrote (stuck-dim on `window_open` + `opacity_from`;
+    // flash-then-wrong on opacity focus animations — observed 2026-07-13/14).
+    // Queuing the all-effects pass re-applies config transparency in the
+    // same `platform_sync` tick; windows still mid-animation are unaffected
+    // (the redraw path re-writes their animated opacity each frame).
+    if !completed_ids.is_empty() {
+      state.pending_sync.queue_all_effects_update();
+    }
+
     // Re-apply any focus change that was deferred while the now-completed
     // resize surrogates were active. `sync_focus` skips `SetForegroundWindow`
     // while a resize session is live to prevent the OS from asynchronously
