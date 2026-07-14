@@ -703,11 +703,30 @@ fn redraw_containers(
       && !suppress_animations
       && config.value.animations.focus_change.enabled
     {
+      // Resolve the opacity this window is coming FROM — its unfocused
+      // state, same precedence as `apply_transparency_effect`: transparency
+      // override (pin / floating / fullscreen state) → `other_windows`
+      // effect → opaque. An override wins both ends of the tween, so pinned
+      // windows correctly don't animate. The focused-side target keeps the
+      // override too so the tween can never fight the effects pass.
+      let override_opacity =
+        window_transparency_override(&window).map(|o| o.to_alpha());
+      let from_opacity = override_opacity.unwrap_or_else(|| {
+        let other_cfg = &config.value.window_effects.other_windows;
+        if other_cfg.transparency.enabled {
+          other_cfg.transparency.opacity.to_alpha()
+        } else {
+          u8::MAX
+        }
+      });
+      let to_opacity = override_opacity.unwrap_or(effect_opacity);
+
       let native_ref = window.native();
       state.animation_manager.start_focus_animation(
         window.id(),
         target_rect.clone(),
-        effect_opacity,
+        from_opacity,
+        to_opacity,
         corner_style,
         config,
         &*native_ref,

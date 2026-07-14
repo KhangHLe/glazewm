@@ -2019,9 +2019,15 @@ impl AnimationManager {
   /// (e.g. a move/resize animation takes priority), or when a workspace-switch
   /// is animating the window.
   ///
-  /// - `Opacity` style: inserts an animation that briefly dims `window_id` from
-  ///   50% of `effect_opacity` back to `effect_opacity`. No surrogate is used;
-  ///   the real window is updated each frame via `SetLayeredWindowAttributes`.
+  /// - `Opacity` style: animates the window's real state transition — from
+  ///   `from_opacity` (its unfocused/other-windows effect opacity) to
+  ///   `effect_opacity` (its focused effect opacity) — so gaining focus
+  ///   *tweens between the two transparency states* instead of snapping.
+  ///   When the two states are indistinguishable (no transparency effects
+  ///   configured), falls back to a brief dip from
+  ///   `opacity_from × effect_opacity` so the animation stays visible.
+  ///   No surrogate is used; the real window is updated each frame via
+  ///   `SetLayeredWindowAttributes`.
   /// - `Scale` style: creates a growing `ResizeSession` from a centred,
   ///   `scale_factor`-shrunken rect to `current_rect`. The real window is
   ///   cloaked and the surrogate reveals the content as it grows.
@@ -2030,6 +2036,7 @@ impl AnimationManager {
     &mut self,
     window_id: Uuid,
     current_rect: Rect,
+    from_opacity: u8,
     effect_opacity: u8,
     corner_style: CornerStyle,
     config: &UserConfig,
@@ -2052,14 +2059,25 @@ impl AnimationManager {
 
     match fc.style {
       FocusAnimationStyle::Opacity => {
-        let dim_frac = effect_frac * fc.opacity_from.clamp(0.0, 1.0);
+        let from_frac = from_opacity as f32 / 255.0;
+
+        // Animate the real inactive→active transition when the two effect
+        // states differ. When they're indistinguishable (no transparency
+        // effects — the tween would be invisible), fall back to the
+        // `opacity_from` dip so the animation still reads.
+        let start_frac = if (from_frac - effect_frac).abs() > 1.0 / 255.0 {
+          from_frac
+        } else {
+          effect_frac * fc.opacity_from.clamp(0.0, 1.0)
+        };
+
         let mut anim = WindowAnimationState::new_movement(
           current_rect.clone(),
           current_rect,
           fc.duration_ms,
           fc.easing.clone(),
         );
-        anim.start_opacity = Some(OpacityValue(dim_frac));
+        anim.start_opacity = Some(OpacityValue(start_frac));
         anim.target_opacity = Some(OpacityValue(effect_frac));
         self.animations.insert(window_id, anim);
         self.ensure_timer_running();
