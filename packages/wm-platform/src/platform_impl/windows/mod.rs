@@ -16,5 +16,6 @@ pub(crate) use keyboard_hook::*;
 pub(crate) use mouse_drag_hook::*;
 pub(crate) use mouse_listener::*;
 pub(crate) use native_window::*;
+pub use native_window::WindowPosBatch;
 pub(crate) use single_instance::*;
 pub(crate) use window_listener::*;

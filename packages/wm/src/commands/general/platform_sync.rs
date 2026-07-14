@@ -504,6 +504,19 @@ fn redraw_containers(
     }
   });
 
+  // Plain (non-animated, non-surrogate) repositions are collected here
+  // and committed atomically after the loop via a `DeferWindowPos`
+  // transaction — mirroring the surrogate batch below. Individual
+  // (especially `SWP_ASYNCWINDOWPOS`) repositions land frames apart, so
+  // two windows exchanging rects expose the desktop in the vacated slot
+  // between the two moves (the swap background-flash, 2026-07-14).
+  #[cfg(target_os = "windows")]
+  let mut deferred_repositions: Vec<(
+    WindowContainer,
+    Rect,
+    Option<WindowZOrder>,
+  )> = Vec::new();
+
   for window in windows_to_update.iter().rev() {
     let should_bring_to_front = windows_to_bring_to_front.contains(window);
 
@@ -970,7 +983,44 @@ fn redraw_containers(
         #[cfg(not(target_os = "windows"))]
         let already_positioned = false;
 
-        if !already_positioned {
+        // A plain reposition of an ordinary visible window is batchable:
+        // it takes the catch-all `SetWindowPos` arm of
+        // `reposition_window` with no restore, no DPI fix-up, and a
+        // no-op visibility step — all of which is deferred to the atomic
+        // post-loop commit instead. Anything animated, surrogate-backed,
+        // dragged, or state-special keeps the individual path.
+        #[cfg(target_os = "windows")]
+        let batchable = !already_positioned
+          && is_visible
+          && !has_surrogate
+          // Steady-state visible only: a hidden→showing window needs the
+          // individual path's show/uncloak ordering.
+          && matches!(window.display_state(), DisplayState::Shown)
+          && window.active_drag().is_none()
+          && !window.has_pending_dpi_adjustment()
+          && state
+            .animation_manager
+            .get_animation(&window.id())
+            .is_none()
+          && matches!(
+            window.state(),
+            WindowState::Tiling | WindowState::Floating(_)
+          )
+          && !window.native().is_minimized().unwrap_or(true)
+          && !window.native().is_maximized().unwrap_or(true);
+        #[cfg(not(target_os = "windows"))]
+        let batchable = false;
+
+        #[cfg(target_os = "windows")]
+        if batchable {
+          deferred_repositions.push((
+            (*window).clone(),
+            apply_rect.clone(),
+            z_order.clone(),
+          ));
+        }
+
+        if !already_positioned && !batchable {
           if let Err(err) = reposition_window(
             window,
             apply_rect,
@@ -1053,6 +1103,12 @@ fn redraw_containers(
     }
   }
 
+  // Commit all plain repositions collected above in a single atomic
+  // `DeferWindowPos` transaction, so windows exchanging rects (swaps)
+  // land in the same compositor frame with no exposed gap.
+  #[cfg(target_os = "windows")]
+  flush_deferred_repositions(&deferred_repositions, config);
+
   // Commit all surrogate repositions queued during this pass in a single
   // `DeferWindowPos` transaction so adjacent windows' edges land in the
   // same DWM composition frame.
@@ -1066,6 +1122,92 @@ fn redraw_containers(
   state.animation_manager.apply_outgoing_surrogate_opacities();
 
   Ok(())
+}
+
+/// Commits the plain repositions collected during the redraw loop in a
+/// single atomic `DeferWindowPos` transaction.
+///
+/// A lone entry takes the historical individual (async) path — identical
+/// behavior to before batching existed. Two or more entries commit
+/// atomically so exchanged rects land in the same compositor frame. On
+/// any batch failure, falls back to individual repositions.
+#[cfg(target_os = "windows")]
+fn flush_deferred_repositions(
+  entries: &[(WindowContainer, Rect, Option<WindowZOrder>)],
+  config: &UserConfig,
+) {
+  use wm_platform::{
+    WindowPosBatch, SWP_ASYNCWINDOWPOS, SWP_FRAMECHANGED, SWP_NOACTIVATE,
+    SWP_NOSENDCHANGING, SWP_NOZORDER,
+  };
+
+  if entries.is_empty() {
+    return;
+  }
+
+  let flags_for = |z_order: &Option<WindowZOrder>| {
+    let mut flags = SWP_NOACTIVATE | SWP_NOSENDCHANGING | SWP_FRAMECHANGED;
+    if z_order.is_none() {
+      flags |= SWP_NOZORDER;
+    }
+    flags
+  };
+
+  let individual = |window: &WindowContainer,
+                    rect: &Rect,
+                    z_order: &Option<WindowZOrder>| {
+    let flags = flags_for(z_order) | SWP_ASYNCWINDOWPOS;
+    if let Err(err) = window.native().set_window_pos(
+      z_order.as_ref().unwrap_or(&WindowZOrder::Normal),
+      rect,
+      flags,
+    ) {
+      tracing::warn!("Failed to set window position: {}", err);
+    }
+  };
+
+  if entries.len() == 1 {
+    let (window, rect, z_order) = &entries[0];
+    individual(window, rect, z_order);
+  } else {
+    let atomic = (|| -> anyhow::Result<()> {
+      #[allow(clippy::cast_possible_truncation, clippy::cast_possible_wrap)]
+      let mut batch = WindowPosBatch::begin(entries.len() as i32)?;
+
+      for (window, rect, z_order) in entries {
+        window.native().defer_window_pos(
+          &mut batch,
+          z_order.as_ref().unwrap_or(&WindowZOrder::Normal),
+          rect,
+          flags_for(z_order),
+        )?;
+      }
+
+      batch.commit()?;
+      Ok(())
+    })();
+
+    if let Err(err) = atomic {
+      tracing::warn!(
+        "Atomic reposition batch failed ({err}); falling back to \
+         individual repositions."
+      );
+      for (window, rect, z_order) in entries {
+        individual(window, rect, z_order);
+      }
+    }
+  }
+
+  // Parity with `reposition_window`'s visibility step for the batched
+  // (steady-state visible) windows: a no-op for already-visible windows,
+  // kept so behavior matches the individual path exactly.
+  for (window, _, _) in entries {
+    if config.value.general.hide_method == HideMethod::Cloak {
+      let _ = window.native().set_cloaked(false);
+    } else {
+      let _ = window.native().show();
+    }
+  }
 }
 
 /// Gets the z-order for a window that's configured to be shown on top.
