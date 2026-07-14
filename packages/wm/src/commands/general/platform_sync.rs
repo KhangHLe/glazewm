@@ -670,11 +670,21 @@ fn redraw_containers(
       } else {
         &config.value.window_effects.other_windows
       };
-      let opacity = if effect_cfg.transparency.enabled {
-        effect_cfg.transparency.opacity.to_alpha()
-      } else {
-        u8::MAX
-      };
+      // Same precedence as `apply_transparency_effect` and the focus
+      // tween: a transparency override (pin / floating / fullscreen
+      // state) wins over the focused/other effect config. Without this,
+      // a pinned-opaque window's surrogate thumbnail flies at the config
+      // transparency (flashing transparent mid-animation) and vice versa
+      // (diagnosed 2026-07-14 — the swap "transparency flicker").
+      let opacity = window_transparency_override(&window)
+        .map(|o| o.to_alpha())
+        .unwrap_or_else(|| {
+          if effect_cfg.transparency.enabled {
+            effect_cfg.transparency.opacity.to_alpha()
+          } else {
+            u8::MAX
+          }
+        });
       let style = if effect_cfg.corner_style.enabled {
         effect_cfg.corner_style.style.clone()
       } else {

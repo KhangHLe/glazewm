@@ -1074,6 +1074,17 @@ impl AnimationManager {
       let fade_now = Instant::now();
       state.animation_manager.pending_session_cleanup.retain_mut(
         |(_, fade_start, session)| {
+          // Translucent windows skip the lingering fade: the overlay
+          // stacking on top of the (already uncloaked, translucent) real
+          // window renders the region over-opaque for the fade duration —
+          // a visible ≤100ms opacity flash at the end of every animation,
+          // worse than the one-frame handoff seam the fade exists to
+          // cover (diagnosed 2026-07-14). Opaque windows keep the fade;
+          // stacking on opaque is invisible.
+          if session.effect_opacity < u8::MAX {
+            return false;
+          }
+
           let start = *fade_start.get_or_insert(fade_now);
           let progress = fade_now.saturating_duration_since(start).as_secs_f32()
             / SESSION_FADE_OUT.as_secs_f32();
