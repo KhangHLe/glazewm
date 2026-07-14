@@ -740,6 +740,17 @@ fn redraw_containers(
     #[cfg(not(target_os = "windows"))]
     let has_focus_anim = false;
 
+    // A window whose native state is still maximized (e.g. leaving
+    // fullscreen via toggle-fullscreen) must take the non-animated path:
+    // the restore that clears the native maximized state lives in
+    // `reposition_window`, which the animation's cloak/pre-position path
+    // skips — leaving the window natively maximized, which the WM then
+    // re-syncs back to fullscreen state in a loop (stuck fullscreen,
+    // observed 2026-07-12). Only queried on state changes to avoid a
+    // per-window syscall on every sync.
+    let needs_native_restore = is_state_change
+      && window.native().is_maximized().unwrap_or(false);
+
     // Windows frozen by an in-flight workspace-switch animation stay on the
     // animation path regardless of suppression — the switch's surrogate
     // teardown uncloaks them, so dropping them here would break its
@@ -749,6 +760,7 @@ fn redraw_containers(
     let should_use_animations = !is_outgoing_switch
       && (is_frozen_by_ws_animation
         || (!is_fullscreen
+          && !needs_native_restore
           && !suppress_animations
           && ((!is_floating && anim_enabled)
             || (is_state_change && anim_enabled)
