@@ -12,9 +12,12 @@ use windows::{
       DWMWA_WINDOW_CORNER_PREFERENCE, DWMWCP_DEFAULT, DWMWCP_DONOTROUND,
       DWMWCP_ROUND, DWMWCP_ROUNDSMALL,
     },
-    System::Threading::{
-      OpenProcess, QueryFullProcessImageNameW, PROCESS_NAME_WIN32,
-      PROCESS_QUERY_LIMITED_INFORMATION,
+    System::{
+      LibraryLoader::{GetModuleHandleW, GetProcAddress},
+      Threading::{
+        OpenProcess, QueryFullProcessImageNameW, PROCESS_NAME_WIN32,
+        PROCESS_QUERY_LIMITED_INFORMATION,
+      },
     },
     UI::{
       Input::KeyboardAndMouse::{
@@ -45,9 +48,101 @@ use windows::{
 
 use super::com::{IApplicationView, COM_INIT};
 use crate::{
-  Color, CornerStyle, Delta, Dispatcher, LengthValue, OpacityValue, Point,
-  Rect, RectDelta, WindowId, WindowZOrder,
+  BlurStyle, Color, CornerStyle, Delta, Dispatcher, LengthValue,
+  OpacityValue, Point, Rect, RectDelta, WindowId, WindowZOrder,
 };
+
+/// Undocumented accent policy plumbing for backdrop blur
+/// (`SetWindowCompositionAttribute`, attribute 19 = `WCA_ACCENT_POLICY`).
+/// Stable since Windows 10 and used cross-process by tools like
+/// TranslucentTB; not present in the SDK import libraries, so it's
+/// resolved dynamically from user32.
+mod accent {
+  use std::sync::OnceLock;
+
+  use windows::{
+    core::{s, w},
+    Win32::Foundation::HWND,
+  };
+
+  use super::{GetModuleHandleW, GetProcAddress};
+
+  #[repr(C)]
+  pub struct AccentPolicy {
+    pub accent_state: u32,
+    pub accent_flags: u32,
+    pub gradient_color: u32,
+    pub animation_id: u32,
+  }
+
+  #[repr(C)]
+  struct WindowCompositionAttributeData {
+    attribute: u32,
+    data: *mut core::ffi::c_void,
+    size: usize,
+  }
+
+  pub const ACCENT_DISABLED: u32 = 0;
+  pub const ACCENT_ENABLE_BLURBEHIND: u32 = 3;
+  pub const ACCENT_ENABLE_ACRYLICBLURBEHIND: u32 = 4;
+
+  const WCA_ACCENT_POLICY: u32 = 19;
+
+  type SetWindowCompositionAttributeFn =
+    unsafe extern "system" fn(
+      HWND,
+      *mut WindowCompositionAttributeData,
+    ) -> i32;
+
+  fn set_window_composition_attribute(
+  ) -> Option<SetWindowCompositionAttributeFn> {
+    static FN: OnceLock<Option<usize>> = OnceLock::new();
+
+    let addr = *FN.get_or_init(|| unsafe {
+      let user32 = GetModuleHandleW(w!("user32.dll")).ok()?;
+      let addr =
+        GetProcAddress(user32, s!("SetWindowCompositionAttribute"))?;
+      Some(addr as usize)
+    });
+
+    // SAFETY: The address, when present, points at the user32 export
+    // with exactly this signature.
+    addr.map(|addr| unsafe {
+      std::mem::transmute::<usize, SetWindowCompositionAttributeFn>(addr)
+    })
+  }
+
+  /// Applies an accent policy to the window. Returns `false` when the
+  /// API is unavailable or the call fails.
+  pub fn apply(hwnd: HWND, state: u32, gradient_abgr: u32) -> bool {
+    let Some(func) = set_window_composition_attribute() else {
+      return false;
+    };
+
+    let mut policy = AccentPolicy {
+      accent_state: state,
+      accent_flags: 2,
+      gradient_color: gradient_abgr,
+      animation_id: 0,
+    };
+
+    let mut data = WindowCompositionAttributeData {
+      attribute: WCA_ACCENT_POLICY,
+      data: std::ptr::from_mut(&mut policy).cast(),
+      size: std::mem::size_of::<AccentPolicy>(),
+    };
+
+    // SAFETY: `policy` outlives the call; the struct layouts match the
+    // OS's expectation for WCA_ACCENT_POLICY.
+    //
+    // NOTE: This call silently no-ops (while still returning success) if
+    // the executable's manifest lacks `<supportedOS>` compatibility GUIDs
+    // — the legacy compatibility context disables the accent-policy path
+    // in DWM. The GUIDs are declared in `packages/wm/build.rs`; keep them
+    // if this feature is to keep working (diagnosed 2026-07-14).
+    unsafe { func(hwnd, &mut data) != 0 }
+  }
+}
 
 /// Magic number used to identify programmatic mouse inputs from our own
 /// process.
@@ -702,6 +797,30 @@ impl NativeWindow {
   }
 
   /// Implements [`NativeWindowWindowsExt::set_transparency`].
+  pub(crate) fn set_blur(
+    &self,
+    style: Option<&BlurStyle>,
+    tint: &Color,
+  ) -> crate::Result<()> {
+    let (state, gradient) = match style {
+      Some(BlurStyle::Acrylic) => {
+        (accent::ACCENT_ENABLE_ACRYLICBLURBEHIND, tint.to_abgr())
+      }
+      Some(BlurStyle::Blur) => {
+        (accent::ACCENT_ENABLE_BLURBEHIND, tint.to_abgr())
+      }
+      None => (accent::ACCENT_DISABLED, 0),
+    };
+
+    if accent::apply(self.hwnd(), state, gradient) {
+      Ok(())
+    } else {
+      Err(crate::Error::Unsupported(
+        "SetWindowCompositionAttribute unavailable or rejected.",
+      ))
+    }
+  }
+
   pub(crate) fn set_transparency(
     &self,
     opacity_value: &OpacityValue,

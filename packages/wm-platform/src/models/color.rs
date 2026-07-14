@@ -18,6 +18,16 @@ impl Color {
     // SAFETY: An invalid hex value is unrepresentable.
     u32::from_str_radix(&bgr, 16).unwrap()
   }
+
+  /// Packs the color as `0xAABBGGRR`, the layout the accent policy's
+  /// `GradientColor` field expects.
+  #[must_use]
+  pub fn to_abgr(&self) -> u32 {
+    (u32::from(self.a) << 24)
+      | (u32::from(self.b) << 16)
+      | (u32::from(self.g) << 8)
+      | u32::from(self.r)
+  }
 }
 
 impl FromStr for Color {

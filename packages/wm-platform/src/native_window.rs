@@ -14,7 +14,7 @@ use crate::{platform_impl, Rect};
 #[cfg(target_os = "macos")]
 use crate::{platform_impl::AXUIElementExt, ThreadBound};
 #[cfg(target_os = "windows")]
-use crate::{Color, CornerStyle, Delta, OpacityValue, RectDelta};
+use crate::{BlurStyle, Color, CornerStyle, Delta, OpacityValue, RectDelta};
 
 /// Unique identifier of a window.
 ///
@@ -325,6 +325,19 @@ pub trait NativeWindowWindowsExt {
     opacity_value: &OpacityValue,
   ) -> crate::Result<()>;
 
+  /// Sets (or clears, with `None`) the backdrop blur material drawn
+  /// behind the window, with a tint whose alpha channel is the smoke
+  /// density. Visible only through the window's own translucent pixels.
+  ///
+  /// # Platform-specific
+  ///
+  /// This method is only available on Windows.
+  fn set_blur(
+    &self,
+    style: Option<&BlurStyle>,
+    tint: &Color,
+  ) -> crate::Result<()>;
+
   /// Adjusts the window's transparency by a relative delta.
   ///
   /// # Platform-specific
@@ -435,6 +448,14 @@ impl NativeWindowWindowsExt for NativeWindow {
     opacity_value: &OpacityValue,
   ) -> crate::Result<()> {
     self.inner.set_transparency(opacity_value)
+  }
+
+  fn set_blur(
+    &self,
+    style: Option<&BlurStyle>,
+    tint: &Color,
+  ) -> crate::Result<()> {
+    self.inner.set_blur(style, tint)
   }
 
   fn adjust_transparency(

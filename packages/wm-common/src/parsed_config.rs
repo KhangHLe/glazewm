@@ -1,7 +1,7 @@
 use serde::{Deserialize, Serialize};
 use wm_platform::{
-  Color, CornerStyle, Key, Keybinding, LengthValue, OpacityValue,
-  RectDelta,
+  BlurStyle, Color, CornerStyle, Key, Keybinding, LengthValue,
+  OpacityValue, RectDelta,
 };
 
 use crate::app_command::InvokeCommand;
@@ -292,6 +292,9 @@ pub struct WindowEffectConfig {
 
   /// Config for optionally applying transparency.
   pub transparency: TransparencyEffectConfig,
+
+  /// Config for optionally applying a backdrop blur material.
+  pub blur: BlurEffectConfig,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -343,6 +346,43 @@ pub struct TransparencyEffectConfig {
 
   /// The opacity to apply.
   pub opacity: OpacityValue,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(default, rename_all(serialize = "camelCase"))]
+pub struct BlurEffectConfig {
+  /// Whether to enable the effect.
+  pub enabled: bool,
+
+  /// Backdrop material (`acrylic` or `blur`) drawn behind the window's
+  /// translucent pixels. Only visible when the window itself paints
+  /// per-pixel transparency (e.g. a terminal with background opacity
+  /// below 1.0).
+  pub style: BlurStyle,
+
+  /// Tint blended into the material, as RGB or RGBA hex — the alpha
+  /// channel is the smoke density (e.g. '#000000b0' = black smoke at
+  /// ~69%). Choose a tint that differs from the window's own background
+  /// color: an identical tint renders the material invisible.
+  pub tint: Color,
+}
+
+impl Default for BlurEffectConfig {
+  fn default() -> Self {
+    Self {
+      enabled: false,
+      style: BlurStyle::default(),
+      // Black smoke at ~69% — the tint has to differ from the expected
+      // window background, so black (below any theme's darkest step)
+      // is the safe default.
+      tint: Color {
+        r: 0,
+        g: 0,
+        b: 0,
+        a: 176,
+      },
+    }
+  }
 }
 
 #[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]

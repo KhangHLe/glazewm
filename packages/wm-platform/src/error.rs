@@ -17,6 +17,9 @@ pub enum Error {
   #[error("Invalid pointer: {0}")]
   InvalidPointer(String),
 
+  #[error("Unsupported platform operation: {0}")]
+  Unsupported(&'static str),
+
   #[error("AXValue creation failed: {0}")]
   #[cfg(target_os = "macos")]
   AXValueCreation(String),

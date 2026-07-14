@@ -1336,6 +1336,33 @@ fn apply_window_effects(
   {
     apply_transparency_effect(window, effect_config);
   }
+
+  // Gated on either side being enabled (like transparency) so that a
+  // one-sided config still clears the material when the window moves to
+  // the disabled side.
+  #[cfg(target_os = "windows")]
+  if window_effects.focused_window.blur.enabled
+    || window_effects.other_windows.blur.enabled
+  {
+    apply_blur_effect(window, effect_config);
+  }
+}
+
+/// Applies (or clears) the backdrop blur material on a window.
+///
+/// The material shows through the window's own translucent pixels only;
+/// opaque windows are unaffected visually, so a blanket apply is safe.
+#[cfg(target_os = "windows")]
+fn apply_blur_effect(
+  window: &WindowContainer,
+  effect_config: &WindowEffectConfig,
+) {
+  let blur = &effect_config.blur;
+  let style = blur.enabled.then_some(&blur.style);
+
+  if let Err(err) = window.native().set_blur(style, &blur.tint) {
+    tracing::debug!("Failed to set window blur: {}", err);
+  }
 }
 
 /// Gets the transparency override for a window, if any.
